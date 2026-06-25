@@ -34,7 +34,8 @@ def register_admin_help(admin_group: app_commands.Group) -> None:
             value="Welcome messages support:\n"
             "`{member.mention}` — mentions the new member\n"
             "`{member.name}` — the member's username\n"
-            "`{server.name}` — the server name",
+            "`{server.name}` — the server name\n"
+            "`{channel.<channel-name>}` — clickable link to a channel (e.g. `{channel.general}`)",
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
