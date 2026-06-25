@@ -3,7 +3,7 @@ from typing import Optional
 import json
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 DINO_IMAGE_DIR = DATA_DIR / "dino_images" / "images"
@@ -62,6 +62,12 @@ def _get_region_weights_arr(mask_rgb: np.ndarray) -> np.ndarray:
     return weights
 
 
+# Option 2: push target color away from gray along its own hue vector
+def _saturate_color(color: np.ndarray, factor: float = 1.6) -> np.ndarray:
+    gray = color.mean()
+    return np.clip(gray + (color - gray) * factor, 0, 255)
+
+
 def detect_used_regions(mask_path: Path) -> set[int]:
     mask_arr = np.array(Image.open(mask_path).convert("RGB"), dtype=np.float32)
     weights = _get_region_weights_arr(mask_arr)
@@ -73,6 +79,8 @@ def apply_region_color(
     mask: Image.Image,
     region_colors: dict[int, int],
     color_lut: dict[int, tuple[int, int, int]],
+    color_saturate_factor: float = 1.6,   # Option 2 strength (1.0 = off)
+    post_saturate_factor: float = 1.35,    # Option 4 strength (1.0 = off)
 ) -> Image.Image:
     has_alpha = image.mode == "RGBA"
     if has_alpha:
@@ -93,16 +101,33 @@ def apply_region_color(
 
         color_id   = region_colors.get(region_id, NEUTRAL_COLOR_ID)
         target     = color_lut.get(color_id, (128, 128, 128))
-        target_arr = np.array(target, dtype=np.float32)
+
+        # Option 2: saturate the target color before blending
+        target_arr = _saturate_color(
+            np.array(target, dtype=np.float32),
+            factor=color_saturate_factor,
+        )
 
         for c in range(3):
             blended[..., c] += _overlay_blend_arr(image_rgb[..., c], target_arr[c]) * w
 
-    max_val   = mask_rgb.max(axis=2)
+    max_val    = mask_rgb.max(axis=2)
     mask_alpha = np.clip(max_val / 255.0, 0.0, 1.0)
-    intensity  = (0.62 * mask_alpha)[..., np.newaxis]
+    intensity  = (0.72 * mask_alpha)[..., np.newaxis]
 
     result_rgb = np.clip(image_rgb * (1 - intensity) + blended * intensity, 0, 255).astype(np.uint8)
+
+    # Option 4: mask-weighted post-blend saturation boost
+    if post_saturate_factor != 1.0:
+        boosted_arr = np.array(
+            ImageEnhance.Color(Image.fromarray(result_rgb, "RGB")).enhance(post_saturate_factor),
+            dtype=np.float32,
+        )
+        mask_weight = mask_alpha[..., np.newaxis]
+        result_rgb = np.clip(
+            result_rgb.astype(np.float32) * (1 - mask_weight) + boosted_arr * mask_weight,
+            0, 255,
+        ).astype(np.uint8)
 
     if has_alpha:
         return Image.fromarray(np.dstack([result_rgb, alpha]), "RGBA")
