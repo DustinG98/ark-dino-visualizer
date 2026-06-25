@@ -1,4 +1,5 @@
-# Single-VPS deployment. Brings up three services on a private bridge:
+# Single-VPS deployment. Brings up services on a private bridge:
+#   - db:        PostgreSQL database for persistent storage
 #   - backend:   FastAPI NOT exposed to the host; only
 #                reachable from frontend on the internal network)
 #   - frontend:  nginx serving the built Vite bundle, reverse-proxying
@@ -15,6 +16,19 @@
 # to the public HTTPS origin so the preflight succeeds.
 
 services:
+  db:
+    image: postgres:15-alpine
+    container_name: ark-dino-visualizer-db
+    restart: unless-stopped
+    networks:
+      - app-net
+    environment:
+      POSTGRES_DB: arkbot
+      POSTGRES_USER: ${DB_USER:-arkbot}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   backend:
     build: ./backend
     container_name: ark-dino-visualizer-backend
@@ -31,9 +45,12 @@ services:
       UVICORN_LOG_LEVEL: ${UVICORN_LOG_LEVEL}
       MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB}
       MAX_BATCH_SIZE: ${MAX_BATCH_SIZE}
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-arkbot}:${DB_PASSWORD:-changeme}@db:5432/arkbot
     volumes:
       - ./backend/app:/app/app
       - ./backend/data:/app/data
+    depends_on:
+      - db
 
   frontend:
     build:
@@ -105,6 +122,7 @@ services:
 volumes:
   certbot-www:
   certbot-certs:
+  postgres_data:
 
 networks:
   app-net:

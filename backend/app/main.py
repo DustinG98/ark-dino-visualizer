@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -10,16 +11,26 @@ from app.api.dinos import (
     load_region_mappings,
     DINO_IMAGE_DIR,
 )
+from app.api.welcome import get_settings, create_or_update_settings, WelcomeSettingsRequest
 from app.config import ALLOWED_ORIGINS, configure_logging
+from app.db import init_db
 from pydantic import BaseModel
 
 
 configure_logging()
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+
 app = FastAPI(
     title="Ark Dino Visualizer",
     version="0.1.0",
     description="ARK ASA Dino Visualizer",
+    lifespan=lifespan,
 )
 
 
@@ -73,6 +84,16 @@ def render_dino(request: RenderRequest):
     buf.seek(0)
 
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/api/welcome/{guild_id}")
+async def get_welcome(guild_id: int):
+    return await get_settings(guild_id)
+
+
+@app.post("/api/welcome")
+async def set_welcome(request: WelcomeSettingsRequest):
+    return await create_or_update_settings(request)
 
 
 app.add_middleware(

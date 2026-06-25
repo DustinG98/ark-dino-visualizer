@@ -61,6 +61,21 @@ class BackendClient:
             raise BackendError(resp.status_code, resp.text or "render failed")
         return resp.content
 
+    async def get_welcome_settings(self, guild_id: int) -> dict | None:
+        resp = await self._client.get(f"/api/welcome/{guild_id}")
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "get welcome settings failed")
+        return resp.json()
+
+    async def set_welcome_settings(self, guild_id: int, channel_id: int, message: str, enabled: bool = False) -> dict:
+        payload = {"guild_id": guild_id, "channel_id": channel_id, "message": message, "enabled": enabled}
+        resp = await self._client.post("/api/welcome", json=payload)
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "set welcome settings failed")
+        return resp.json()
+
 
 def is_too_large_for_discord(data: bytes, cap_bytes: int = 8 * 1024 * 1024) -> bool:
     return len(data) > cap_bytes

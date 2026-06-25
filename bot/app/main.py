@@ -10,7 +10,7 @@ from discord import app_commands
 
 from .backend_client import BackendClient
 from .cache import Cache
-from .commands import register_commands, set_client
+from .bot_commands import register_commands, set_client
 from .config import Config, load_config
 
 
@@ -66,6 +66,7 @@ def configure_logging(level: str) -> None:
 
 async def run_bot(config: Config, health: HealthState) -> None:
     intents = discord.Intents.default()
+    intents.members = True
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
     backend = BackendClient(config.backend_url)
@@ -80,12 +81,15 @@ async def run_bot(config: Config, health: HealthState) -> None:
         health.disk_ready = True
         log.info("discord ready as %s (id=%s)", client.user, client.user.id if client.user else "?")
 
-        try:
-            await cache.warm_up()
-            health.cache_warm = True
-        except Exception as exc:
-            log.error("cache warm-up failed: %s", exc)
+        async def warm_up_async() -> None:
+            try:
+                await cache.warm_up()
+                health.cache_warm = True
+                log.info("cache warm-up complete")
+            except Exception as exc:
+                log.error("cache warm-up failed: %s", exc)
 
+        asyncio.create_task(warm_up_async())
         await cache.start_background_refresh()
 
         if config.guild_id is not None:
@@ -105,6 +109,49 @@ async def run_bot(config: Config, health: HealthState) -> None:
     @client.event
     async def on_resumed() -> None:
         log.info("discord session resumed")
+
+    @client.event
+    async def on_member_join(member: discord.Member) -> None:
+        if member.guild is None:
+            return
+
+        guild_id = member.guild.id
+
+        try:
+            settings = await backend.get_welcome_settings(guild_id)
+        except Exception as exc:
+            log.warning("failed to fetch welcome settings for guild %s: %s", guild_id, exc)
+            return
+
+        if settings is None:
+            return
+
+        if not settings.get("enabled", False):
+            return
+
+        channel = member.guild.get_channel(settings["channel_id"])
+        if channel is None:
+            log.warning("welcome channel %s not found in guild %s", settings["channel_id"], guild_id)
+            return
+
+        message_template = settings["message"]
+        message = message_template.replace("{member.mention}", member.mention)
+        message = message.replace("{member.name}", member.name)
+        message = message.replace("{server.name}", member.guild.name)
+
+        import re
+        for match in re.finditer(r"\{channel\.([^}]+)\}", message_template):
+            channel_name = match.group(1)
+            found = discord.utils.get(member.guild.text_channels, name=channel_name)
+            if found:
+                message = message.replace(match.group(0), f"<#{found.id}>")
+            else:
+                message = message.replace(match.group(0), f"#{channel_name}")
+
+        try:
+            await channel.send(message)
+        except Exception as exc:
+            log.warning("failed to send welcome message in guild %s: %s", guild_id, exc)
 
     stop_event = asyncio.Event()
 
