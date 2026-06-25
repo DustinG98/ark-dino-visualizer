@@ -1,0 +1,10 @@
+{
+  "name": "ark-dino-visualizer",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "bun run --filter frontend dev"
+  }
+}

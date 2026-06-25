@@ -1,0 +1,34 @@
+{
+  "Region Mapping": [
+    {
+      "Region ID": 0,
+      "Mask Color": "Region 0",
+      "RGB": [255, 0, 0]
+    },
+    {
+      "Region ID": 1,
+      "Mask Color": "Region 1",
+      "RGB": [0, 255, 0]
+    },
+    {
+      "Region ID": 2,
+      "Mask Color": "Region 2",
+      "RGB": [0, 0, 255]
+    },
+    {
+      "Region ID": 3,
+      "Mask Color": "Region 3",
+      "RGB": [0, 255, 255]
+    },
+    {
+      "Region ID": 4,
+      "Mask Color": "Region 4",
+      "RGB": [255, 255, 0]
+    },
+    {
+      "Region ID": 5,
+      "Mask Color": "Region 5",
+      "RGB": [255, 0, 255]
+    }
+  ]
+}

@@ -1,0 +1,111 @@
+# Single-VPS deployment. Brings up three services on a private bridge:
+#   - backend:   FastAPI NOT exposed to the host; only
+#                reachable from frontend on the internal network)
+#   - frontend:  nginx serving the built Vite bundle, reverse-proxying
+#                /api/* and /docs to the backend, and serving the ACME
+#                challenge. Exposes ports 80 and 443.
+#   - bot:       Discord bot that proxies user commands to the backend
+#                over the internal docker network. No host port.
+#   - certbot:   obtains + renews the Let's Encrypt certificate from a
+#                shared webroot volume.
+#
+# The frontend image is built with VITE_API_BASE_URL=/api (same-origin
+# calls), so the browser hits /api/analyze and nginx routes it. CORS
+# on the backend is configured via ALLOWED_ORIGINS in .env — set it
+# to the public HTTPS origin so the preflight succeeds.
+
+services:
+  backend:
+    build: ./backend
+    container_name: ark-dino-visualizer-backend
+    restart: unless-stopped
+    expose:
+      - "8000"
+    networks:
+      - app-net
+    environment:
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      UVICORN_HOST: ${UVICORN_HOST}
+      UVICORN_PORT: ${UVICORN_PORT}
+      UVICORN_WORKERS: ${UVICORN_WORKERS}
+      UVICORN_LOG_LEVEL: ${UVICORN_LOG_LEVEL}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE}
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        CERTBOT_DOMAIN: ${CERTBOT_DOMAIN:-}
+    container_name: ark-dino-visualizer-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - app-net
+    environment:
+      CERTBOT_DOMAIN: ${CERTBOT_DOMAIN:-}
+    volumes:
+      - certbot-www:/var/www/certbot:ro
+      - certbot-certs:/etc/letsencrypt:ro
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  bot:
+    build: ./bot
+    container_name: ark-dino-visualizer-bot
+    restart: unless-stopped
+    networks:
+      - app-net
+    environment:
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
+      BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
+      GUILD_ID: ${GUILD_ID:-}
+      BOT_LOG_LEVEL: ${BOT_LOG_LEVEL:-INFO}
+      HEALTHCHECK_HOST: 0.0.0.0
+      HEALTHCHECK_PORT: 8080
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: ark-dino-visualizer-certbot
+    restart: unless-stopped
+    networks:
+      - app-net
+    environment:
+      CERTBOT_DOMAIN: ${CERTBOT_DOMAIN:-}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:-}
+      CERTBOT_STAGING: ${CERTBOT_STAGING:-false}
+    # Invoke via `sh` so the script doesn't need the executable bit
+    # (which isn't reliably preserved on Windows checkouts of bind mounts).
+    entrypoint: ["/bin/sh", "/usr/local/bin/certbot-entrypoint.sh"]
+    volumes:
+      - ./nginx/certbot-entrypoint.sh:/usr/local/bin/certbot-entrypoint.sh:ro
+      - certbot-www:/var/www/certbot
+      - certbot-certs:/etc/letsencrypt
+
+volumes:
+  certbot-www:
+  certbot-certs:
+
+networks:
+  app-net:
+    driver: bridge

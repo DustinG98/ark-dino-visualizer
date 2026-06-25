@@ -1,0 +1,3 @@
+[submodule "backend/data/dino_images"]
+	path = backend/data/dino_images
+	url = https://github.com/arkutils/species-images.git

@@ -1,0 +1,17 @@
+.vscode/*
+!.vscode/extensions.json
+node_modules/
+.kilo
+
+# Python (shared + bot/)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Environment files. The .env.example template IS tracked.
+.env
+.env.*
+!.env.example
+!.env.local.example
