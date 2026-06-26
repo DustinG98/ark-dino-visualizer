@@ -12,6 +12,7 @@ from .backend_client import BackendClient
 from .cache import Cache
 from .bot_commands import register_commands, set_client
 from .config import Config, load_config
+from .giveaway_scheduler import init_scheduler
 
 
 log = logging.getLogger(__name__)
@@ -67,10 +68,32 @@ def configure_logging(level: str) -> None:
 async def run_bot(config: Config, health: HealthState) -> None:
     intents = discord.Intents.default()
     intents.members = True
+    log.info("discord.py version: %s", discord.__version__)
     client = discord.Client(intents=intents)
     tree = app_commands.CommandTree(client)
+
+    @tree.error
+    async def _on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        if isinstance(error, app_commands.CheckFailure):
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(str(error) or "You don't have permission to use this command.", ephemeral=True)
+                else:
+                    await interaction.response.send_message(str(error) or "You don't have permission to use this command.", ephemeral=True)
+            except Exception:
+                pass
+            return
+        log.exception("unhandled app command error for %s by %s", interaction.command, interaction.user)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("An unexpected error occurred.", ephemeral=True)
+            else:
+                await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+        except Exception:
+            pass
     backend = BackendClient(config.backend_url)
     cache = Cache(backend)
+    scheduler = init_scheduler(client, backend)
 
     set_client(backend)
 
@@ -91,6 +114,11 @@ async def run_bot(config: Config, health: HealthState) -> None:
 
         asyncio.create_task(warm_up_async())
         await cache.start_background_refresh()
+
+        try:
+            await scheduler.start()
+        except Exception as exc:
+            log.error("giveaway scheduler start failed: %s", exc)
 
         if config.guild_id is not None:
             guild = discord.Object(id=config.guild_id)
@@ -171,6 +199,7 @@ async def run_bot(config: Config, health: HealthState) -> None:
         try:
             await client.start(config.discord_bot_token)
         finally:
+            await scheduler.stop()
             await cache.stop()
             await backend.close()
 

@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query
+import logging
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 
 from app.api.dinos import (
     get_dino_list,
@@ -12,12 +13,16 @@ from app.api.dinos import (
     DINO_IMAGE_DIR,
 )
 from app.api.welcome import get_settings, create_or_update_settings, WelcomeSettingsRequest
+from app.api.giveaway import router as giveaway_router
 from app.config import ALLOWED_ORIGINS, configure_logging
 from app.db import init_db
 from pydantic import BaseModel
 
 
 configure_logging()
+
+
+_log = logging.getLogger("app")
 
 
 @asynccontextmanager
@@ -32,6 +37,23 @@ app = FastAPI(
     description="ARK ASA Dino Visualizer",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    _log.error(
+        "UNHANDLED %s on %s %s: %s: %s",
+        type(exc).__name__,
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+        exc,
+    )
+    _log.exception("traceback for %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}", "type": type(exc).__name__},
+    )
 
 
 class RenderRequest(BaseModel):
@@ -94,6 +116,9 @@ async def get_welcome(guild_id: int):
 @app.post("/api/welcome")
 async def set_welcome(request: WelcomeSettingsRequest):
     return await create_or_update_settings(request)
+
+
+app.include_router(giveaway_router)
 
 
 app.add_middleware(
