@@ -33,6 +33,7 @@ def register_commands(tree: app_commands.CommandTree, cache) -> None:
         register_welcome_commands,
         register_admin_help,
         register_giveaway_admin_commands,
+        register_role_picker_admin_commands,
     )
     from app.commands.public.giveaway import register_giveaway_commands
 
@@ -50,6 +51,7 @@ def register_commands(tree: app_commands.CommandTree, cache) -> None:
     register_welcome_commands(admin_group)
     register_admin_help(admin_group)
     register_giveaway_admin_commands(admin_group)
+    register_role_picker_admin_commands(admin_group)
     register_giveaway_commands(tree)
 
     @forge_group.command(name="help", description="Show help topics.")

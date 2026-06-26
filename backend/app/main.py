@@ -14,6 +14,7 @@ from app.api.dinos import (
 )
 from app.api.welcome import get_settings, create_or_update_settings, WelcomeSettingsRequest
 from app.api.giveaway import router as giveaway_router
+from app.api.role_picker import router as role_picker_router
 from app.config import ALLOWED_ORIGINS, configure_logging
 from app.db import init_db
 from pydantic import BaseModel
@@ -119,6 +120,7 @@ async def set_welcome(request: WelcomeSettingsRequest):
 
 
 app.include_router(giveaway_router)
+app.include_router(role_picker_router)
 
 
 app.add_middleware(

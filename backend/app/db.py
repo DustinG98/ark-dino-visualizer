@@ -39,6 +39,7 @@ class Guild(Base):
     welcome_message = relationship("WelcomeMessage", back_populates="guild", uselist=False)
     giveaway_settings = relationship("GiveawaySettings", back_populates="guild", uselist=False)
     giveaways = relationship("Giveaway", back_populates="guild")
+    role_picker_settings = relationship("RolePickerSettings", back_populates="guild", uselist=False)
 
 
 class WelcomeMessage(Base):
@@ -68,6 +69,31 @@ class GiveawaySettings(Base):
     updated_at = Column(Integer, nullable=False, default=lambda: int(datetime.utcnow().timestamp()))
 
     guild = relationship("Guild", back_populates="giveaway_settings")
+
+
+class RolePickerSettings(Base):
+    __tablename__ = "role_picker_settings"
+
+    guild_id = Column(BigInteger, ForeignKey("guilds.guild_id"), primary_key=True)
+    admin_panel_channel_id = Column(BigInteger, nullable=True)
+    admin_panel_message_id = Column(BigInteger, nullable=True)
+    public_panel_channel_id = Column(BigInteger, nullable=True)
+    public_panel_message_id = Column(BigInteger, nullable=True)
+    updated_at = Column(Integer, nullable=False, default=lambda: int(datetime.utcnow().timestamp()))
+
+    guild = relationship("Guild", back_populates="role_picker_settings")
+
+
+class RolePickerRole(Base):
+    __tablename__ = "role_picker_roles"
+
+    guild_id = Column(BigInteger, ForeignKey("guilds.guild_id"), primary_key=True)
+    position = Column(Integer, primary_key=True)
+    role_id = Column(BigInteger, nullable=False)
+    label = Column(String(80), nullable=False)
+    emoji = Column(String(64), nullable=True)
+    description = Column(String(100), nullable=True)
+    created_at = Column(Integer, nullable=False, default=lambda: int(datetime.utcnow().timestamp()))
 
 
 class Giveaway(Base):
@@ -138,12 +164,14 @@ async def _run_lightweight_migrations(conn) -> None:
         "ALTER TABLE giveaway_settings ADD COLUMN IF NOT EXISTS admin_panel_message_id BIGINT",
         "ALTER TABLE giveaway_settings ADD COLUMN IF NOT EXISTS public_panel_channel_id BIGINT",
         "ALTER TABLE giveaway_settings ADD COLUMN IF NOT EXISTS public_panel_message_id BIGINT",
+        "CREATE TABLE IF NOT EXISTS role_picker_settings (guild_id BIGINT PRIMARY KEY REFERENCES guilds(guild_id) ON DELETE CASCADE, admin_panel_channel_id BIGINT, admin_panel_message_id BIGINT, public_panel_channel_id BIGINT, public_panel_message_id BIGINT, updated_at INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS role_picker_roles (guild_id BIGINT NOT NULL REFERENCES guilds(guild_id) ON DELETE CASCADE, position INTEGER NOT NULL, role_id BIGINT NOT NULL, label VARCHAR(80) NOT NULL, emoji VARCHAR(64), description VARCHAR(100), created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, position))",
     ]
     for stmt in statements:
         try:
             await conn.execute(text(stmt))
         except Exception as exc:
-            log.warning("migration statement failed (%s): %s", stmt, exc)
+            _log.warning("migration statement failed (%s): %s", stmt, exc)
 
 
 async def get_guild(guild_id: int) -> Guild | None:
@@ -707,3 +735,184 @@ async def cancel_exchange(id: str) -> GiveawayExchange | None:
             await session.commit()
             await session.refresh(exchange)
         return exchange
+
+
+# ─── Role Picker ──────────────────────────────────────────────────────────────────
+
+async def get_role_picker_settings(guild_id: int) -> RolePickerSettings | None:
+    async with async_session() as session:
+        return await session.get(RolePickerSettings, guild_id)
+
+
+async def upsert_role_picker_settings(guild_id: int) -> RolePickerSettings:
+    await upsert_guild(guild_id)
+    async with async_session() as session:
+        existing = await session.get(RolePickerSettings, guild_id)
+        if existing is None:
+            existing = RolePickerSettings(guild_id=guild_id)
+            session.add(existing)
+        existing.updated_at = int(datetime.utcnow().timestamp())
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
+
+async def update_role_picker_admin_panel_channel(guild_id: int, channel_id: int | None) -> RolePickerSettings:
+    await upsert_guild(guild_id)
+    async with async_session() as session:
+        existing = await session.get(RolePickerSettings, guild_id)
+        if existing is None:
+            existing = RolePickerSettings(guild_id=guild_id)
+            session.add(existing)
+        existing.admin_panel_channel_id = channel_id
+        existing.updated_at = int(datetime.utcnow().timestamp())
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
+
+async def update_role_picker_admin_panel_message(guild_id: int, message_id: int | None) -> RolePickerSettings | None:
+    async with async_session() as session:
+        existing = await session.get(RolePickerSettings, guild_id)
+        if existing is None:
+            return None
+        existing.admin_panel_message_id = message_id
+        existing.updated_at = int(datetime.utcnow().timestamp())
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
+
+async def update_role_picker_public_panel_channel(guild_id: int, channel_id: int | None) -> RolePickerSettings:
+    await upsert_guild(guild_id)
+    async with async_session() as session:
+        existing = await session.get(RolePickerSettings, guild_id)
+        if existing is None:
+            existing = RolePickerSettings(guild_id=guild_id)
+            session.add(existing)
+        existing.public_panel_channel_id = channel_id
+        existing.updated_at = int(datetime.utcnow().timestamp())
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
+
+async def update_role_picker_public_panel_message(guild_id: int, message_id: int | None) -> RolePickerSettings | None:
+    async with async_session() as session:
+        existing = await session.get(RolePickerSettings, guild_id)
+        if existing is None:
+            return None
+        existing.public_panel_message_id = message_id
+        existing.updated_at = int(datetime.utcnow().timestamp())
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
+
+async def get_role_picker_roles(guild_id: int) -> list[dict]:
+    from sqlalchemy import select
+
+    async with async_session() as session:
+        stmt = select(RolePickerRole).where(RolePickerRole.guild_id == guild_id).order_by(RolePickerRole.position.asc())
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            {
+                "guild_id": r.guild_id,
+                "position": r.position,
+                "role_id": r.role_id,
+                "label": r.label,
+                "emoji": r.emoji,
+                "description": r.description,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
+
+
+async def upsert_role_picker_role(
+    guild_id: int,
+    position: int,
+    role_id: int,
+    label: str,
+    emoji: str | None,
+    description: str | None,
+) -> dict:
+    await upsert_guild(guild_id)
+    async with async_session() as session:
+        existing = await session.get(RolePickerRole, (guild_id, position))
+        if existing is None:
+            existing = RolePickerRole(
+                guild_id=guild_id,
+                position=position,
+                role_id=role_id,
+                label=label,
+                emoji=emoji,
+                description=description,
+            )
+            session.add(existing)
+        else:
+            existing.role_id = role_id
+            existing.label = label
+            existing.emoji = emoji
+            existing.description = description
+        await session.commit()
+        await session.refresh(existing)
+        return {
+            "guild_id": existing.guild_id,
+            "position": existing.position,
+            "role_id": existing.role_id,
+            "label": existing.label,
+            "emoji": existing.emoji,
+            "description": existing.description,
+            "created_at": existing.created_at,
+        }
+
+
+async def delete_role_picker_role(guild_id: int, position: int) -> bool:
+    from sqlalchemy import select
+
+    async with async_session() as session:
+        row = await session.get(RolePickerRole, (guild_id, position))
+        if row is None:
+            return False
+        await session.delete(row)
+        stmt = select(RolePickerRole).where(
+            RolePickerRole.guild_id == guild_id, RolePickerRole.position > position
+        ).order_by(RolePickerRole.position.asc())
+        result = await session.execute(stmt)
+        for r in result.scalars().all():
+            r.position = r.position - 1
+        await session.commit()
+        return True
+
+
+async def count_role_picker_roles(guild_id: int) -> int:
+    from sqlalchemy import func, select
+
+    async with async_session() as session:
+        stmt = select(func.count(RolePickerRole.guild_id)).where(RolePickerRole.guild_id == guild_id)
+        result = await session.execute(stmt)
+        return int(result.scalar() or 0)
+
+
+async def list_role_picker_settings_with_public_panel() -> list[int]:
+    from sqlalchemy import select
+
+    async with async_session() as session:
+        stmt = select(RolePickerSettings.guild_id).where(
+            RolePickerSettings.public_panel_channel_id.isnot(None)
+        )
+        result = await session.execute(stmt)
+        return [int(row[0]) for row in result.all()]
+
+
+async def list_role_picker_settings_with_admin_panel() -> list[int]:
+    from sqlalchemy import select
+
+    async with async_session() as session:
+        stmt = select(RolePickerSettings.guild_id).where(
+            RolePickerSettings.admin_panel_channel_id.isnot(None)
+        )
+        result = await session.execute(stmt)
+        return [int(row[0]) for row in result.all()]

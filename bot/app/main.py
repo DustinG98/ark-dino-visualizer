@@ -12,7 +12,8 @@ from .backend_client import BackendClient
 from .cache import Cache
 from .bot_commands import register_commands, set_client
 from .config import Config, load_config
-from .giveaway_scheduler import init_scheduler
+from .giveaway_scheduler import init_scheduler as init_giveaway_scheduler
+from .role_picker_scheduler import init_scheduler as init_role_picker_scheduler
 
 
 log = logging.getLogger(__name__)
@@ -93,7 +94,8 @@ async def run_bot(config: Config, health: HealthState) -> None:
             pass
     backend = BackendClient(config.backend_url)
     cache = Cache(backend)
-    scheduler = init_scheduler(client, backend)
+    giveaway_scheduler = init_giveaway_scheduler(client, backend)
+    role_picker_scheduler = init_role_picker_scheduler(client, backend)
 
     set_client(backend)
 
@@ -116,9 +118,14 @@ async def run_bot(config: Config, health: HealthState) -> None:
         await cache.start_background_refresh()
 
         try:
-            await scheduler.start()
+            await giveaway_scheduler.start()
         except Exception as exc:
             log.error("giveaway scheduler start failed: %s", exc)
+
+        try:
+            await role_picker_scheduler.start()
+        except Exception as exc:
+            log.error("role picker scheduler start failed: %s", exc)
 
         if config.guild_id is not None:
             guild = discord.Object(id=config.guild_id)
@@ -199,7 +206,8 @@ async def run_bot(config: Config, health: HealthState) -> None:
         try:
             await client.start(config.discord_bot_token)
         finally:
-            await scheduler.stop()
+            await giveaway_scheduler.stop()
+            await role_picker_scheduler.stop()
             await cache.stop()
             await backend.close()
 

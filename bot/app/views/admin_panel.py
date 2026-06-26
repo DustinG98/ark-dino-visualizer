@@ -502,7 +502,6 @@ class AdminGiveawayPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-
 class _ForceCancelConfirmPlaceholder(discord.ui.Button):
     """Hidden placeholder so the Select menu can sit on its own row cleanly.
     Not user-clickable; replaced by a per-giveaway Confirm view on selection.

@@ -344,6 +344,111 @@ class BackendClient:
             raise BackendError(resp.status_code, resp.text or "cancel exchange failed")
         return resp.json()
 
+    async def get_role_picker_settings(self, guild_id: int) -> dict | None:
+        resp = await self._client.get(f"/api/role-picker/settings/{guild_id}")
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "get role picker settings failed")
+        return resp.json()
+
+    async def get_role_picker_roles(self, guild_id: int) -> list[dict]:
+        resp = await self._client.get(f"/api/role-picker/roles/{guild_id}")
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "get role picker roles failed")
+        data = resp.json()
+        return data.get("roles", []) if isinstance(data, dict) else data
+
+    async def add_role_picker_role(
+        self,
+        guild_id: int,
+        role_id: int,
+        label: str,
+        emoji: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        payload: dict = {
+            "guild_id": guild_id,
+            "role_id": role_id,
+            "label": label,
+        }
+        if emoji is not None:
+            payload["emoji"] = emoji
+        if description is not None:
+            payload["description"] = description
+        resp = await self._client.post("/api/role-picker/roles", json=payload)
+        if resp.status_code not in (200, 201):
+            raise BackendError(resp.status_code, resp.text or "add role picker role failed")
+        return resp.json()
+
+    async def edit_role_picker_role(
+        self,
+        guild_id: int,
+        position: int,
+        label: str | None = None,
+        emoji: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        payload: dict = {}
+        if label is not None:
+            payload["label"] = label
+        if emoji is not None:
+            payload["emoji"] = emoji
+        if description is not None:
+            payload["description"] = description
+        resp = await self._client.patch(f"/api/role-picker/roles/{guild_id}/{position}", json=payload)
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "edit role picker role failed")
+        return resp.json()
+
+    async def remove_role_picker_role(self, guild_id: int, position: int) -> dict:
+        resp = await self._client.delete(f"/api/role-picker/roles/{guild_id}/{position}")
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "remove role picker role failed")
+        return resp.json()
+
+    async def reorder_role_picker_roles(self, guild_id: int, ordered_role_ids: list[int]) -> dict:
+        resp = await self._client.post(f"/api/role-picker/roles/{guild_id}/reorder", json={"ordered_role_ids": ordered_role_ids})
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "reorder role picker roles failed")
+        return resp.json()
+
+    async def update_role_picker_admin_panel_channel(self, guild_id: int, channel_id: int | None) -> dict:
+        payload: dict = {"guild_id": guild_id}
+        if channel_id is not None:
+            payload["channel_id"] = channel_id
+        resp = await self._client.post("/api/role-picker/settings/admin-panel-channel", json=payload)
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "update role picker admin panel channel failed")
+        return resp.json()
+
+    async def update_role_picker_admin_panel_message(self, guild_id: int, message_id: int | None) -> dict:
+        payload: dict = {"guild_id": guild_id}
+        if message_id is not None:
+            payload["message_id"] = message_id
+        resp = await self._client.post("/api/role-picker/settings/admin-panel-message", json=payload)
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "update role picker admin panel message failed")
+        return resp.json()
+
+    async def update_role_picker_public_panel_channel(self, guild_id: int, channel_id: int | None) -> dict:
+        payload: dict = {"guild_id": guild_id}
+        if channel_id is not None:
+            payload["channel_id"] = channel_id
+        resp = await self._client.post("/api/role-picker/settings/public-panel-channel", json=payload)
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "update role picker public panel channel failed")
+        return resp.json()
+
+    async def update_role_picker_public_panel_message(self, guild_id: int, message_id: int | None) -> dict:
+        payload: dict = {"guild_id": guild_id}
+        if message_id is not None:
+            payload["message_id"] = message_id
+        resp = await self._client.post("/api/role-picker/settings/public-panel-message", json=payload)
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "update role picker public panel message failed")
+        return resp.json()
+
 
 def is_too_large_for_discord(data: bytes, cap_bytes: int = 8 * 1024 * 1024) -> bool:
     return len(data) > cap_bytes
