@@ -6,7 +6,7 @@ import discord
 from discord import app_commands, Interaction
 
 from ...backend_client import BackendError
-from ...views.giveaway import make_enter_view, make_cancel_view
+from ...views.giveaway import build_giveaway_view
 
 
 log = logging.getLogger(__name__)
@@ -16,6 +16,16 @@ _DURATION_RE = re.compile(r"^(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+_UNCONFIGURED_MSG = (
+    "Giveaways aren't configured in this server. "
+    "Ask an admin to enable them with `/forge admin giveaway-enable` "
+    "(or use the admin panel)."
+)
+
+
+_GIVEAWAY_CHANNEL_PREFIX = "🎁-"
 
 
 def _slug(text: str, max_len: int = 60) -> str:
@@ -50,43 +60,47 @@ def _parse_duration(text: str) -> timedelta | None:
     return None
 
 
-async def _ensure_enabled(interaction: Interaction) -> tuple[dict, discord.TextChannel, discord.CategoryChannel | None] | None:
+async def _reply(interaction: Interaction, content: str) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(content, ephemeral=True)
+    else:
+        await interaction.response.send_message(content, ephemeral=True)
+
+
+async def _validate_giveaway_setup(
+    interaction: Interaction,
+) -> tuple[dict | None, discord.TextChannel | None, discord.CategoryChannel | None, str | None]:
+    """Return (settings, channel, category, error_message).
+
+    `error_message` is non-None iff giveaways aren't usable. Caller is
+    responsible for surfacing it ephemerally.
+    """
     guild_id = interaction.guild_id
     if guild_id is None:
-        await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
-        return None
+        return None, None, None, "This must be used in a server."
     backend = _get_client()
     try:
         settings = await backend.get_giveaway_settings(guild_id)
     except BackendError as exc:
-        await interaction.response.send_message(f"Failed to load settings: `{exc.message}`", ephemeral=True)
-        return None
-    if settings is None or not settings.get("enabled", False):
-        await interaction.response.send_message(
-            "Giveaways are not enabled in this server. Ask an admin to run `/forge admin giveaway-enable`.",
-            ephemeral=True,
-        )
-        return None
+        return None, None, None, f"Failed to load settings: `{exc.message}`"
+    if not settings or not settings.get("enabled", False):
+        return None, None, None, _UNCONFIGURED_MSG
     channel_id = settings.get("channel_id")
-    if not channel_id:
-        await interaction.response.send_message(
-            "No giveaway channel configured. Ask an admin to set one with `/forge admin giveaway-channel`.",
-            ephemeral=True,
-        )
-        return None
+    category_id = settings.get("category_id")
+    if not channel_id or not category_id:
+        return None, None, None, _UNCONFIGURED_MSG
     guild = interaction.guild
     channel = guild.get_channel(int(channel_id)) if guild else None
     if channel is None or not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("Configured giveaway channel not found.", ephemeral=True)
-        return None
-
+        return None, None, None, _UNCONFIGURED_MSG
     category: discord.CategoryChannel | None = None
-    category_id = settings.get("category_id")
     if category_id:
         cat_obj = guild.get_channel(int(category_id)) if guild else None
         if isinstance(cat_obj, discord.CategoryChannel):
             category = cat_obj
-    return settings, channel, category
+    if category is None:
+        return None, None, None, _UNCONFIGURED_MSG
+    return settings, channel, category, None
 
 
 async def _create_per_giveaway_channel(
@@ -100,7 +114,7 @@ async def _create_per_giveaway_channel(
     if guild is None or bot_member is None:
         return None, "Bot member not found in this server."
     base = _slug(title, max_len=80)
-    name = f"giveaway-{base}"
+    name = f"{_GIVEAWAY_CHANNEL_PREFIX}giveaway-{base}"
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
@@ -159,54 +173,6 @@ async def _create_per_giveaway_channel(
     except discord.HTTPException as exc:
         log.warning("failed to create per-giveaway channel: %s", exc)
         return None, f"Discord returned: {exc}"
-    base = _slug(title, max_len=80)
-    name = f"giveaway-{base}"
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-        bot_member: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            manage_channels=True,
-            manage_messages=True,
-        ),
-    }
-    admin_role = discord.utils.get(guild.roles, permissions=discord.Permissions(administrator=True))
-    if admin_role is not None:
-        overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-
-    try:
-        return await guild.create_text_channel(
-            name=name,
-            category=category,
-            overwrites=overwrites,
-            reason=f"New giveaway: {title}",
-        )
-    except discord.Forbidden as exc:
-        me = guild.me
-        perms = me.guild_permissions if me else discord.Permissions.none()
-        missing: list[str] = []
-        if not perms.manage_channels:
-            missing.append("`Manage Channels`")
-        if not perms.manage_roles:
-            missing.append("`Manage Roles` (needed to apply permission overwrites)")
-        if not perms.manage_messages:
-            missing.append("`Manage Messages`")
-        if not me or category.permissions_for(me).manage_channels is False:
-            missing.append("category-specific `Manage Channels` for the giveaway category")
-        msg = (
-            f"Missing permissions: {', '.join(missing)}. "
-            "Ensure the bot's role is **above** all roles it tries to overwrite, and that the bot has "
-            "`Manage Channels` + `Manage Roles` server-wide **and** in the giveaway category."
-            if missing else
-            f"Discord returned: {exc}"
-        )
-        log.warning("failed to create per-giveaway channel: %s", msg)
-        raise PermissionError(msg) from exc
-    except discord.HTTPException as exc:
-        log.warning("failed to create per-giveaway channel: %s", exc)
-        return None
 
 
 async def _make_giveaway_message(
@@ -234,13 +200,7 @@ async def _make_giveaway_message(
     if image_url:
         embed.set_image(url=image_url)
 
-    view = make_enter_view(giveaway_id)
-    cancel_view = make_cancel_view(giveaway_id)
-    combined = discord.ui.View(timeout=None)
-    for child in view.children:
-        combined.add_item(child)
-    for child in cancel_view.children:
-        combined.add_item(child)
+    view = build_giveaway_view(giveaway_id)
 
     content_parts = []
     if ping_role_id:
@@ -248,7 +208,7 @@ async def _make_giveaway_message(
     content_parts.append(f"New giveaway hosted by {interaction.user.mention}")
     content = " — ".join(content_parts) if len(content_parts) > 1 else content_parts[0]
 
-    return await channel.send(content=content, embed=embed, view=combined)
+    return await channel.send(content=content, embed=embed, view=view)
 
 
 async def run_giveaway_create(
@@ -261,13 +221,10 @@ async def run_giveaway_create(
     image_url: str | None,
 ) -> tuple[bool, str]:
     """Validate inputs, create the per-giveaway channel + giveaway, post embed. Returns (ok, message)."""
-    ensured = await _ensure_enabled(interaction)
-    if ensured is None:
-        return False, "Giveaways aren't enabled in this server."
-    settings, _default_channel, category = ensured
-
-    if category is None:
-        return False, "No giveaway category configured. Ask an admin to run `/forge admin giveaway-enable` (or use the admin panel)."
+    settings, _default_channel, category, err_msg = await _validate_giveaway_setup(interaction)
+    if err_msg is not None:
+        await _reply(interaction, err_msg)
+        return False, err_msg
 
     if winners < 1 or winners > 20:
         return False, "Winners must be between 1 and 20."
@@ -363,7 +320,8 @@ def register_giveaway_commands(tree: app_commands.CommandTree) -> None:
             description=description,
             image_url=image_url,
         )
-        await interaction.followup.send(msg_text, ephemeral=True)
+        if ok:
+            await interaction.followup.send(msg_text, ephemeral=True)
 
     @giveaway_group.command(name="list", description="List active giveaways in this server.")
     async def giveaway_list(interaction: Interaction):
@@ -391,7 +349,7 @@ def register_giveaway_commands(tree: app_commands.CommandTree) -> None:
             embed.add_field(name=f"`{gid}` — {title_v}", value=f"Ends: {end_at}\nEntries: {entries}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @giveaway_group.command(name="cancel", description="Cancel one of your giveaways.")
+    @giveaway_group.command(name="cancel", description="End one of your giveaways immediately and select winners.")
     @app_commands.describe(giveaway_id="The giveaway id (visible in /giveaway list and the giveaway footer).")
     async def giveaway_cancel(interaction: Interaction, giveaway_id: str):
         backend = _get_client()
@@ -407,14 +365,23 @@ def register_giveaway_commands(tree: app_commands.CommandTree) -> None:
             await interaction.response.send_message("You can only cancel giveaways you created.", ephemeral=True)
             return
 
+        from ...commands.admin.giveaway import run_giveaway_force_end
+
         await interaction.response.defer(ephemeral=True)
-        from ...giveaway_scheduler import cancel_giveaway_now
-        try:
-            await cancel_giveaway_now(interaction.client, giveaway_id, requested_by=interaction.user.id)
-        except Exception as exc:
-            await interaction.followup.send(f"Failed to cancel: `{exc}`", ephemeral=True)
+        result = await run_giveaway_force_end(
+            interaction.client,
+            interaction.guild_id,
+            giveaway_id,
+            requested_by=interaction.user.id,
+        )
+        if not result["ok"]:
+            await interaction.followup.send(
+                f"Failed at {result['stage']}: `{result['message']}`", ephemeral=True
+            )
             return
-        await interaction.followup.send("Giveaway cancelled.", ephemeral=True)
+        await interaction.followup.send(
+            f"Giveaway `{giveaway_id}` ended and winners selected.", ephemeral=True
+        )
 
     @giveaway_group.command(name="help", description="Show public giveaway commands.")
     async def giveaway_help(interaction: Interaction):
@@ -457,8 +424,9 @@ def register_giveaway_commands(tree: app_commands.CommandTree) -> None:
         embed.add_field(
             name="/giveaway cancel <giveaway_id>",
             value=(
-                "Cancel one of **your** giveaways. You can only cancel giveaways you created. "
-                "Admins can force-cancel any giveaway via `/forge admin giveaway-cancel`."
+                "End one of **your** giveaways immediately and select winners. "
+                "You can only end giveaways you created. "
+                "Admins can end any giveaway from the per-giveaway channel via the **End now (Admin)** button."
             ),
             inline=False,
         )

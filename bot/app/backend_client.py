@@ -329,6 +329,17 @@ class BackendClient:
             return [ex for ex in data if isinstance(ex, dict)]
         return [ex for ex in (data.get("exchanges", []) or []) if isinstance(ex, dict)]
 
+    async def list_pending_exchanges(self) -> list[dict]:
+        resp = await self._client.get("/api/giveaway/exchanges")
+        if resp.status_code != 200:
+            raise BackendError(resp.status_code, resp.text or "list pending exchanges failed")
+        data = resp.json()
+        if isinstance(data, list):
+            return [ex for ex in data if isinstance(ex, dict)]
+        return [ex for ex in (data.get("exchanges", []) or []) if isinstance(ex, dict)]
+
+
+
     async def confirm_exchange(self, exchange_id: str, by: str) -> dict:
         resp = await self._client.post(
             f"/api/giveaway/exchanges/{exchange_id}/confirm",

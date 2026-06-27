@@ -134,6 +134,11 @@ async def run_bot(config: Config, health: HealthState) -> None:
                 log.info("synced %d commands to guild %s", len(synced), config.guild_id)
             except Exception as exc:
                 log.error("guild sync failed: %s", exc)
+            try:
+                synced = await tree.sync()
+                log.info("synced %d commands globally", len(synced))
+            except Exception as exc:
+                log.error("global sync failed: %s", exc)
         else:
             try:
                 synced = await tree.sync()

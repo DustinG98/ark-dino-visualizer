@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 
 ENTER_PREFIX = "giveaway:enter:"
 CANCEL_PREFIX = "giveaway:cancel:"
+FORCE_END_PREFIX = "giveaway:force_end:"
 
 
 def _get_client():
@@ -80,7 +81,7 @@ class GiveawayEnterView(discord.ui.View):
         _set_entry_count(embed, len(entries))
 
         try:
-            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.response.edit_message(embed=embed, view=build_giveaway_view(giveaway_id))
         except discord.HTTPException as exc:
             log.warning("failed to edit giveaway embed: %s", exc)
             await interaction.response.send_message(
@@ -109,16 +110,38 @@ class GiveawayCancelView(discord.ui.View):
         self.add_item(cancel_btn)
 
     async def _cancel_callback(self, interaction: Interaction) -> None:
-        from ..giveaway_scheduler import cancel_giveaway_now
+        try:
+            data = await _get_client().get_giveaway(self.giveaway_id)
+        except BackendError as exc:
+            await interaction.response.send_message(f"Failed to fetch giveaway: `{exc.message}`", ephemeral=True)
+            return
+        if data is None:
+            await interaction.response.send_message("This giveaway no longer exists.", ephemeral=True)
+            return
+        if int(data.get("creator_id", 0)) != interaction.user.id:
+            await interaction.response.send_message(
+                "Only the giveaway creator can cancel this giveaway.", ephemeral=True
+            )
+            return
+
+        from ..commands.admin.giveaway import run_giveaway_force_end
 
         await interaction.response.defer(ephemeral=True)
-        try:
-            await cancel_giveaway_now(interaction.client, self.giveaway_id, requested_by=interaction.user.id)
-        except Exception as exc:
-            log.warning("cancel giveaway failed for %s: %s", self.giveaway_id, exc)
-            await interaction.followup.send(f"Failed to cancel: `{exc}`", ephemeral=True)
+        result = await run_giveaway_force_end(
+            interaction.client,
+            interaction.guild_id,
+            self.giveaway_id,
+            requested_by=interaction.user.id,
+        )
+        if not result["ok"]:
+            await interaction.followup.send(
+                f"Failed at {result['stage']}: `{result['message']}`", ephemeral=True
+            )
             return
-        await interaction.followup.send("Giveaway cancelled.", ephemeral=True)
+        await interaction.followup.send(
+            f"Giveaway `{self.giveaway_id}` ended and winners selected.",
+            ephemeral=True,
+        )
 
 
 def make_enter_view(giveaway_id: str) -> GiveawayEnterView:
@@ -135,3 +158,72 @@ def enter_custom_id(giveaway_id: str) -> str:
 
 def cancel_custom_id(giveaway_id: str) -> str:
     return f"{CANCEL_PREFIX}{giveaway_id}"
+
+
+def build_giveaway_view(giveaway_id: str) -> discord.ui.View:
+    """Combined View (Enter + Cancel Giveaway + End now (Admin)) used for the
+    per-giveaway message. Reused on every embed edit so the Force End button
+    survives enter/leave toggles.
+    """
+    combined = discord.ui.View(timeout=None)
+    for child in make_enter_view(giveaway_id).children:
+        combined.add_item(child)
+    for child in make_cancel_view(giveaway_id).children:
+        combined.add_item(child)
+    for child in make_force_end_view(giveaway_id).children:
+        combined.add_item(child)
+    return combined
+
+
+class ForceEndGiveawayView(discord.ui.View):
+    """Admin-only 'End now' button rendered in the per-giveaway channel.
+
+    Picks winners immediately via the same `_end_giveaway` path the scheduler
+    uses for a normal end, then posts the winners embed and deletes the
+    per-giveaway channel.
+    """
+
+    def __init__(self, giveaway_id: str):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+        btn = discord.ui.Button(
+            label="End now (Admin)",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"{FORCE_END_PREFIX}{giveaway_id}",
+        )
+        btn.callback = self._callback
+        self.add_item(btn)
+
+    async def _callback(self, interaction: Interaction) -> None:
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not (
+            member.guild_permissions.administrator or member.guild_permissions.manage_guild
+        ):
+            await interaction.response.send_message(
+                "You need the **Manage Server** permission to end this giveaway immediately.",
+                ephemeral=True,
+            )
+            return
+
+        from ..commands.admin.giveaway import run_giveaway_force_end
+
+        await interaction.response.defer(ephemeral=True)
+        result = await run_giveaway_force_end(
+            interaction.client,
+            interaction.guild_id,
+            self.giveaway_id,
+            requested_by=interaction.user.id,
+        )
+        if not result["ok"]:
+            await interaction.followup.send(
+                f"Failed at {result['stage']}: `{result['message']}`", ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            f"Giveaway `{self.giveaway_id}` ended and winners selected.",
+            ephemeral=True,
+        )
+
+
+def make_force_end_view(giveaway_id: str) -> ForceEndGiveawayView:
+    return ForceEndGiveawayView(giveaway_id)

@@ -115,7 +115,8 @@ class PublicGiveawayCreateModal(discord.ui.Modal, title="Create a Giveaway"):
             description=(self.description_input or None),
             image_url=image_url,
         )
-        await interaction.followup.send(message, ephemeral=True)
+        if ok:
+            await interaction.followup.send(message, ephemeral=True)
 
 
 PUBLIC_PANEL_BTN_PREFIX = "public_giveaway:"

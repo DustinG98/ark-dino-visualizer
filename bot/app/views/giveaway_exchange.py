@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 CLAIM_PREFIX = "giveaway:claim:"
 WINNER_CONFIRM_PREFIX = "giveaway:winner_confirm:"
 CREATOR_CONFIRM_PREFIX = "giveaway:creator_confirm:"
+FORCE_CLOSE_PREFIX = "giveaway:force_close_exchange:"
 
 
 def claim_custom_id(giveaway_id: str, winner_id: int) -> str:
@@ -36,6 +37,9 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 def _slug(text: str, max_len: int = 80) -> str:
     s = _SLUG_RE.sub("-", text.lower()).strip("-")
     return s[:max_len] or "giveaway"
+
+
+_GIVEAWAY_CHANNEL_PREFIX = "🎁-"
 
 
 def _get_client():
@@ -146,7 +150,7 @@ async def _handle_claim(interaction: Interaction, giveaway_id: str, allowed_winn
             )
             return
 
-    channel_name = f"exchange-{_slug(data.get('title', 'giveaway'))}-{winner.id % 10000:04d}"
+    channel_name = f"{_GIVEAWAY_CHANNEL_PREFIX}exchange-{_slug(data.get('title', 'giveaway'))}-{winner.id % 10000:04d}"
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -323,6 +327,70 @@ async def _close_exchange_channel(client: discord.Client, exchange_id: str) -> N
         pass
     except discord.HTTPException as exc:
         log.warning("close: failed to delete channel: %s", exc)
+
+
+async def _force_close_exchange(client: discord.Client, exchange_id: str) -> None:
+    """Admin-driven close: marks the exchange 'cancelled', marks both confirmations,
+    posts a notice in the exchange channel, updates the master winners embed, and
+    deletes the channel. Mirrors the natural completion path but is unconditional.
+    """
+    backend = _get_client()
+    try:
+        exchange = await backend.get_exchange(exchange_id)
+    except BackendError as exc:
+        log.warning("force_close: failed to fetch %s: %s", exchange_id, exc)
+        return
+
+    if exchange is None:
+        return
+
+    guild_id = exchange.get("guild_id")
+    channel_id = exchange.get("channel_id")
+    if not guild_id or not channel_id:
+        return
+
+    guild = client.get_guild(int(guild_id))
+    if guild is None:
+        return
+    channel = guild.get_channel(int(channel_id))
+
+    try:
+        cancelled = await backend.cancel_exchange(exchange_id)
+    except BackendError as exc:
+        log.warning("force_close: cancel_exchange failed for %s: %s", exchange_id, exc)
+        return
+
+    merged = {**exchange, **cancelled}
+
+    winners_message_id = merged.get("winners_message_id")
+    if winners_message_id and channel is not None:
+        try:
+            await _update_winners_message_in_master(client, merged, claimed=False)
+        except Exception as exc:
+            log.warning("force_close: failed to update winners message: %s", exc)
+        try:
+            await _maybe_finalize_winners_log(client, merged)
+        except Exception as exc:
+            log.warning("force_close: failed to finalize winners log: %s", exc)
+
+    if isinstance(channel, discord.TextChannel):
+        embed = discord.Embed(
+            title="🎁 Exchange Closed",
+            description="This exchange was force-closed by an admin. The channel will be deleted shortly.",
+            color=discord.Color.greyple(),
+        )
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            log.warning("force_close: failed to post notice: %s", exc)
+        import asyncio
+        await asyncio.sleep(3)
+        try:
+            await channel.delete(reason="Giveaway exchange force-closed by admin")
+        except discord.NotFound:
+            pass
+        except discord.HTTPException as exc:
+            log.warning("force_close: failed to delete channel: %s", exc)
 
 
 async def _update_exchange_status_message(interaction: Interaction, exchange: dict) -> None:
@@ -617,11 +685,40 @@ class ExchangeView(discord.ui.View):
         creator_btn.callback = self._creator_callback
         self.add_item(creator_btn)
 
+        force_close_btn = discord.ui.Button(
+            label="Force Close (Admin)",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"{FORCE_CLOSE_PREFIX}{exchange_id}",
+        )
+        force_close_btn.callback = self._force_close_callback
+        self.add_item(force_close_btn)
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        # Confirm buttons are gated by per-button authorization (winner/creator match).
+        # The Force Close button checks Manage Server inside its own callback.
+        return True
+
     async def _winner_callback(self, interaction: Interaction) -> None:
         await self._confirm(interaction, "winner", interaction.user.id == self.winner_id)
 
     async def _creator_callback(self, interaction: Interaction) -> None:
         await self._confirm(interaction, "creator", interaction.user.id == self.creator_id)
+
+    async def _force_close_callback(self, interaction: Interaction) -> None:
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not (
+            member.guild_permissions.administrator or member.guild_permissions.manage_guild
+        ):
+            await interaction.response.send_message(
+                "You need the **Manage Server** permission to force-close this exchange.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _force_close_exchange(interaction.client, self.exchange_id)
+        await interaction.followup.send(
+            f"Exchange `{self.exchange_id}` force-closed.", ephemeral=True
+        )
 
     async def _confirm(self, interaction: Interaction, by: str, authorized: bool) -> None:
         if not authorized:

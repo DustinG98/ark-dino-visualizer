@@ -61,7 +61,13 @@ def register_admin_help(admin_group: app_commands.Group) -> None:
         )
         embed.add_field(
             name="/forge admin giveaway-cancel <id>",
-            value="Force-cancel an active giveaway by its id.",
+            value=(
+                "Force-cancel an active giveaway by its id. Deletes the giveaway message "
+                "and the per-giveaway channel. No winners are selected — use the "
+                "**End now (Admin)** button on the per-giveaway channel (or the "
+                "**Force-Cancel a Giveaway** button on the admin panel) to end properly "
+                "with winner selection."
+            ),
             inline=False,
         )
         embed.add_field(

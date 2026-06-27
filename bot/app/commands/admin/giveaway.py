@@ -138,6 +138,41 @@ async def run_giveaway_force_cancel(client: discord.Client, guild_id: int, givea
     return {"ok": True, "data": data}
 
 
+async def run_giveaway_force_end(
+    client: discord.Client,
+    guild_id: int,
+    giveaway_id: str,
+    requested_by: int,
+) -> dict:
+    """End an active giveaway immediately, picking winners via the scheduler's
+    normal end path (which posts the winners embed and deletes the per-giveaway
+    channel). Returns {ok, stage?, message?, data?}.
+    """
+    backend = _get_client()
+    try:
+        data = await backend.get_giveaway(giveaway_id)
+    except BackendError as exc:
+        return {"ok": False, "stage": "fetch", "message": exc.message}
+    if data is None:
+        return {"ok": False, "stage": "lookup", "message": "Giveaway not found."}
+    if int(data.get("guild_id", 0)) != guild_id:
+        return {"ok": False, "stage": "guild", "message": "That giveaway belongs to a different server."}
+    if data.get("status") != "active":
+        return {"ok": False, "stage": "status", "message": f"Giveaway is already {data.get('status')}."}
+
+    from ...giveaway_scheduler import get_scheduler
+    sched = get_scheduler()
+    if sched is None:
+        return {"ok": False, "stage": "scheduler", "message": "Scheduler unavailable."}
+
+    sched.cancel_task(giveaway_id)
+    try:
+        await sched._end_giveaway(giveaway_id)
+    except Exception as exc:
+        return {"ok": False, "stage": "end", "message": str(exc)}
+    return {"ok": True, "data": data}
+
+
 async def run_giveaway_panel_set_channel(guild_id: int, channel_id: int) -> dict:
     backend = _get_client()
     try:
@@ -154,6 +189,46 @@ async def run_giveaway_public_panel_set_channel(guild_id: int, channel_id: int) 
     except BackendError as exc:
         return {"ok": False, "message": exc.message}
     return {"ok": True}
+
+
+async def ensure_giveaways_configured(interaction: Interaction) -> dict | None:
+    """Return giveaway settings if enabled + channel_id + category_id are all set.
+
+    Otherwise send an ephemeral warning and return None. Safe to call before or
+    after `interaction.response.defer()`.
+    """
+    backend = _get_client()
+    guild_id = interaction.guild_id
+    if guild_id is None:
+        if interaction.response.is_done():
+            await interaction.followup.send("This must be used in a server.", ephemeral=True)
+        else:
+            await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+        return None
+    try:
+        settings = await backend.get_giveaway_settings(guild_id)
+    except BackendError as exc:
+        msg = f"Failed to load settings: `{exc.message}`"
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return None
+
+    if not settings or not settings.get("enabled", False):
+        msg = "Giveaways aren't configured yet. Run `/forge admin giveaway-enable` first."
+    elif not settings.get("channel_id"):
+        msg = "No giveaway announcement channel configured. Run `/forge admin giveaway-enable` first."
+    elif not settings.get("category_id"):
+        msg = "No giveaway category configured. Run `/forge admin giveaway-enable` first."
+    else:
+        return settings
+
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
+    return None
 
 
 async def post_admin_panel(client: discord.Client, guild: discord.Guild, channel_id: int) -> int | None:
@@ -326,12 +401,16 @@ def register_giveaway_admin_commands(admin_group: app_commands.Group) -> None:
             await interaction.response.send_message("This command must be used in a server.", ephemeral=True)
             return
 
-        result = await run_giveaway_public_panel_set_channel(guild_id, channel.id)
-        if not result["ok"]:
-            await interaction.response.send_message(f"Failed to save: `{result['message']}`", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        settings = await ensure_giveaways_configured(interaction)
+        if settings is None:
             return
 
-        await interaction.response.defer(ephemeral=True)
+        result = await run_giveaway_public_panel_set_channel(guild_id, channel.id)
+        if not result["ok"]:
+            await interaction.followup.send(f"Failed to save: `{result['message']}`", ephemeral=True)
+            return
+
         message_id = await post_public_panel(interaction.client, interaction.guild, channel.id)
         if message_id is None:
             await interaction.followup.send(

@@ -258,15 +258,22 @@ class SetPublicPanelView(discord.ui.View):
         if self.selected_channel_id is None:
             await interaction.response.send_message("Pick a channel first.", ephemeral=True)
             return
-        from ..commands.admin.giveaway import run_giveaway_public_panel_set_channel
+        await interaction.response.defer(ephemeral=True)
+        from ..commands.admin.giveaway import (
+            run_giveaway_public_panel_set_channel,
+            ensure_giveaways_configured,
+        )
+        settings = await ensure_giveaways_configured(interaction)
+        if settings is None:
+            return
         result = await run_giveaway_public_panel_set_channel(self.guild_id, self.selected_channel_id)
         if not result["ok"]:
-            await interaction.response.send_message(f"Failed to save: `{result['message']}`", ephemeral=True)
+            await interaction.followup.send(f"Failed to save: `{result['message']}`", ephemeral=True)
             return
         guild = interaction.guild
         ch = guild.get_channel(self.selected_channel_id) if guild else None
         mention = ch.mention if isinstance(ch, discord.TextChannel) else f"<#{self.selected_channel_id}>"
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Public panel channel set to {mention}.", ephemeral=True
         )
         await _auto_dismiss(interaction, "✅ Saved.")

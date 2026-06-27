@@ -73,7 +73,7 @@ def register_commands(tree: app_commands.CommandTree, cache) -> None:
         )
         embed.add_field(
             name="/giveaway help",
-            value="Public commands — create, list, and cancel giveaways.",
+            value="Public commands — create, list, and end your own giveaways (winners selected).",
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)

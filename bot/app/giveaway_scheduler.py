@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import discord
 
 from .backend_client import BackendClient, BackendError
-from .views.giveaway import make_enter_view, make_cancel_view, enter_custom_id, cancel_custom_id
+from .views.giveaway import make_enter_view, make_cancel_view, make_force_end_view, enter_custom_id, cancel_custom_id
 from .views.giveaway_exchange import ClaimView, ExchangeView, make_claim_view
 
 
@@ -43,6 +43,7 @@ class GiveawayScheduler:
         try:
             self._client.add_view(make_enter_view(giveaway_id))
             self._client.add_view(make_cancel_view(giveaway_id))
+            self._client.add_view(make_force_end_view(giveaway_id))
             self._registered_ids.add(giveaway_id)
         except Exception as exc:
             log.warning("failed to register giveaway views for %s: %s", giveaway_id, exc)
@@ -103,7 +104,11 @@ class GiveawayScheduler:
             if not gid:
                 continue
             self.register_views(gid)
-            end_at = _parse_end_at(g.get("end_at"))
+            raw_end_at = g.get("end_at")
+            raw_end_at_iso = g.get("end_at_iso")
+            end_at = _parse_end_at(raw_end_at)
+            if end_at is None and raw_end_at_iso is not None:
+                end_at = _parse_end_at(raw_end_at_iso)
             if end_at is None:
                 continue
             if end_at <= now:
@@ -130,11 +135,193 @@ class GiveawayScheduler:
         await load_admin_panel_state_from_db(self._client, self._backend)
         await load_public_panel_state_from_db(self._client, self._backend)
         await self.on_ready_sweep()
+        await self._recover_claim_views_from_master_channels()
+        await self._recover_exchange_views()
         await self._register_admin_panel_views()
         await self._register_public_panel_views()
         await self.refresh_admin_panels(full=True)
         await self.refresh_public_panels(full=True)
         self._sweep_task = asyncio.create_task(self._sweep_loop(), name="giveaway-sweep")
+
+    async def _recover_exchange_views(self) -> None:
+        """Re-register Exchange views for in-progress exchange channels.
+
+        `ExchangeView` is created and attached to the exchange message inside
+        `_handle_claim`, and `client.add_view` is never called explicitly, so
+        the View lives only as long as the process. After a restart, the Confirm
+        Received / Confirm Sent buttons in an existing exchange channel have no
+        matching View → 'Interaction Failed'.
+
+        For each pending exchange in the backend, register a fresh ExchangeView
+        (matches by `giveaway:winner_confirm:<id>` and `giveaway:creator_confirm:<id>`)
+        and re-attach it to the persisted exchange message so the buttons render.
+        """
+        from .views.giveaway_exchange import ExchangeView, WINNER_CONFIRM_PREFIX
+
+        try:
+            pending = await self._backend.list_pending_exchanges()
+        except Exception as exc:
+            log.warning("exchange recovery: list_pending failed: %s", exc)
+            return
+
+        for ex in pending:
+            exchange_id = ex.get("id") or ex.get("exchange_id")
+            guild_id = ex.get("guild_id")
+            channel_id = ex.get("channel_id")
+            message_id = ex.get("exchange_message_id")
+            winner_id = int(ex.get("winner_id") or 0)
+            creator_id = int(ex.get("creator_id") or 0)
+            giveaway_id = ex.get("giveaway_id") or ""
+            if not exchange_id or not guild_id or not channel_id:
+                continue
+            if not winner_id or not creator_id or not giveaway_id:
+                continue
+            guild = self._client.get_guild(int(guild_id))
+            if guild is None:
+                continue
+            channel = guild.get_channel(int(channel_id))
+            if not isinstance(channel, discord.TextChannel):
+                continue
+
+            msg: discord.Message | None = None
+            if message_id:
+                try:
+                    msg = await channel.fetch_message(int(message_id))
+                except discord.NotFound:
+                    msg = None
+                except discord.HTTPException as exc:
+                    log.debug(
+                        "exchange recovery: fetch_message failed for %s in %s: %s",
+                        message_id, channel_id, exc,
+                    )
+                    continue
+
+            if msg is None:
+                # Older exchanges may predate the exchange_message_id backfill.
+                # Scan the exchange channel for a message with our confirm buttons
+                # and backfill the id so future restarts are cheap.
+                winner_custom_id = f"{WINNER_CONFIRM_PREFIX}{exchange_id}"
+                try:
+                    async for hist in channel.history(limit=25):
+                        if hist.author.id != self._client.user.id:
+                            continue
+                        for comp in hist.components:
+                            for child in comp.children:
+                                if getattr(child, "custom_id", None) == winner_custom_id:
+                                    msg = hist
+                                    break
+                            if msg is not None:
+                                break
+                        if msg is not None:
+                            break
+                except discord.HTTPException as exc:
+                    log.debug(
+                        "exchange recovery: history scan failed for %s in %s: %s",
+                        channel_id, exchange_id, exc,
+                    )
+                if msg is None:
+                    continue
+                try:
+                    await self._backend.update_exchange_messages(
+                        exchange_id,
+                        exchange_message_id=msg.id,
+                        winners_message_id=ex.get("winners_message_id"),
+                    )
+                except Exception as exc:
+                    log.debug(
+                        "exchange recovery: backfill exchange_message_id failed for %s: %s",
+                        exchange_id, exc,
+                    )
+
+            try:
+                self._client.add_view(
+                    ExchangeView(exchange_id, giveaway_id, winner_id, creator_id)
+                )
+            except Exception as exc:
+                log.warning("exchange recovery: add_view failed for %s: %s", exchange_id, exc)
+                continue
+            try:
+                await msg.edit(view=ExchangeView(exchange_id, giveaway_id, winner_id, creator_id))
+            except discord.HTTPException as exc:
+                log.debug(
+                    "exchange recovery: edit failed for %s in %s: %s",
+                    msg.id, channel_id, exc,
+                )
+
+    async def _recover_claim_views_from_master_channels(self) -> None:
+        """Re-register Claim views for winners messages that survived a restart.
+
+        `register_claim_view` is called from `_post_winners_safe` while the bot is
+        running, so claim buttons posted before a restart keep working until the
+        process dies. After a restart, in-memory view registrations are gone, so
+        clicking Claim on an existing winners message yields 'Interaction Failed'
+        because no View matches the custom_id.
+
+        Iterate every guild's configured master announcement channel and look for
+        messages with `giveaway:claim:<giveaway_id>:<winner_id>` buttons, then
+        re-register the view for that giveaway (only if the giveaway's backend
+        status is still 'ended' — cancelled or otherwise-mutated giveaways are
+        skipped so the button stays inert). Also prime `_winners_message_cache`
+        so post-claim flows can backfill the id.
+        """
+        from .views.giveaway_exchange import CLAIM_PREFIX
+
+        for guild in self._client.guilds:
+            try:
+                settings = await self._backend.get_giveaway_settings(guild.id)
+            except Exception as exc:
+                log.debug("claim recovery: settings fetch failed for guild %s: %s", guild.id, exc)
+                continue
+            if not settings:
+                continue
+            master_id = settings.get("channel_id")
+            if not master_id:
+                continue
+            channel = guild.get_channel(int(master_id))
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            try:
+                async for msg in channel.history(limit=50):
+                    if msg.author.id != self._client.user.id:
+                        continue
+                    claim_gid: str | None = None
+                    winner_ids: list[int] = []
+                    winner_labels: dict[int, str] = {}
+                    found_claim_button = False
+                    for comp in msg.components:
+                        for child in comp.children:
+                            cid = getattr(child, "custom_id", None)
+                            if not isinstance(cid, str):
+                                continue
+                            if cid.startswith(CLAIM_PREFIX):
+                                found_claim_button = True
+                                rest = cid[len(CLAIM_PREFIX):]
+                                if ":" in rest:
+                                    gid_str, winner_str = rest.split(":", 1)
+                                    if claim_gid is None:
+                                        claim_gid = gid_str
+                                    try:
+                                        winner_ids.append(int(winner_str))
+                                    except ValueError:
+                                        pass
+                                label = getattr(child, "label", "") or ""
+                                if winner_ids:
+                                    if label.startswith("Claim (for @") and label.endswith(")"):
+                                        name = label[len("Claim (for @"):-1]
+                                        winner_labels[winner_ids[-1]] = name
+                    if not found_claim_button or not claim_gid:
+                        continue
+                    try:
+                        giveaway = await self._backend.get_giveaway(claim_gid)
+                    except Exception as exc:
+                        log.debug("claim recovery: status fetch failed for %s: %s", claim_gid, exc)
+                        continue
+                    if not giveaway or giveaway.get("status") != "ended":
+                        continue
+                    self.register_claim_view(claim_gid, winner_ids, winner_labels)
+                    _store_winners_message_id(claim_gid, winner_ids, msg.id)
+            except discord.HTTPException as exc:
+                log.warning("claim recovery: history scan failed for guild %s channel %s: %s", guild.id, master_id, exc)
 
     async def _register_admin_panel_views(self) -> None:
         from .views.admin_panel import make_admin_panel_view
@@ -356,7 +543,11 @@ class GiveawayScheduler:
             if not gid:
                 continue
             self.register_views(gid)
-            end_at = _parse_end_at(g.get("end_at"))
+            raw_end_at = g.get("end_at")
+            raw_end_at_iso = g.get("end_at_iso")
+            end_at = _parse_end_at(raw_end_at)
+            if end_at is None and raw_end_at_iso is not None:
+                end_at = _parse_end_at(raw_end_at_iso)
             if end_at is None:
                 continue
             if end_at <= now:
@@ -612,17 +803,25 @@ async def cancel_giveaway_now(client: discord.Client, giveaway_id: str, requeste
     channel_id = data.get("channel_id")
     message_id = data.get("message_id")
     guild_id = data.get("guild_id")
-    if channel_id and message_id:
+    if channel_id:
         guild = client.get_guild(int(guild_id)) if guild_id else None
         channel = guild.get_channel(int(channel_id)) if guild else None
-        if channel is not None:
+        if isinstance(channel, discord.TextChannel):
+            if message_id:
+                try:
+                    msg = await channel.fetch_message(int(message_id))
+                    await msg.delete()
+                except discord.NotFound:
+                    pass
+                except discord.HTTPException as exc:
+                    log.warning("cancel: failed to delete message: %s", exc)
             try:
-                msg = await channel.fetch_message(int(message_id))
-                await msg.delete()
+                await channel.delete(reason=f"Giveaway {giveaway_id} cancelled")
+                log.info("deleted per-giveaway channel %s for cancelled %s", channel_id, giveaway_id)
             except discord.NotFound:
                 pass
             except discord.HTTPException as exc:
-                log.warning("cancel: failed to delete message: %s", exc)
+                log.warning("cancel: failed to delete per-giveaway channel %s: %s", channel_id, exc)
 
 
 def _get_backend() -> BackendClient:
@@ -635,6 +834,11 @@ def _parse_end_at(value) -> datetime | None:
         return None
     if isinstance(value, datetime):
         dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
     else:
         try:
             text = str(value).replace("Z", "+00:00")

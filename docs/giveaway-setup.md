@@ -123,7 +123,13 @@ Set via the admin panel's **Disable** button, or `/forge admin giveaway-disable`
 Set via the admin panel's **View Settings** button, or `/forge admin giveaway-view`. Ephemeral embed showing status, channel, category, ping role, admin panel channel, public panel channel.
 
 **Force-cancel a giveaway**
-Set via the admin panel's **Force-Cancel a Giveaway**, or `/forge admin giveaway-cancel <id>`. Cancels any giveaway regardless of creator. Use the giveaway id from `/giveaway list` or from the giveaway channel footer.
+Set via the admin panel's **Force-Cancel a Giveaway**, or `/forge admin giveaway-cancel <id>`. Cancels any giveaway regardless of creator and deletes the per-giveaway channel. No winners are selected — use the **End now (Admin)** button on the per-giveaway channel to end properly with winner selection. Use the giveaway id from `/giveaway list` or from the giveaway channel footer.
+
+**Force-end a giveaway (with winners)**
+Admins with **Manage Server** can click **End now (Admin)** in the per-giveaway channel to end the giveaway immediately, pick random winners, post the winners embed in the master announcement channel, and delete the per-giveaway channel. The same flow runs when the creator presses **Cancel Giveaway** in the per-giveaway channel.
+
+**Force-close an exchange**
+Admins with **Manage Server** can click **Force Close (Admin)** in an exchange channel to cancel it, post a notice, and delete the channel. Use when a winner is unresponsive and the exchange needs to be cleaned up.
 
 ---
 
@@ -150,7 +156,7 @@ All admin commands live under `/forge admin ...` and require the **Manage Server
 - `/forge admin giveaway-disable` — Disable giveaways for this server (keeps settings).
 - `/forge admin giveaway-ping-role @role` — Set the role pinged when a new giveaway opens (in the per-giveaway channel). Leave empty to clear.
 - `/forge admin giveaway-view` — Show the current giveaway settings (status, channel, category, ping role, panel channels).
-- `/forge admin giveaway-cancel <id>` — Force-cancel an active giveaway by its id.
+- `/forge admin giveaway-cancel <id>` — Force-cancel an active giveaway by its id. Deletes the giveaway message and the per-giveaway channel. No winners are selected; for that use the **End now (Admin)** button on the per-giveaway channel.
 
 ## Welcome messages
 
@@ -180,7 +186,7 @@ User-facing commands live under `/giveaway ...` and are available to any member 
 
 - `/giveaway create <title> <winners> <duration> [description] [image]` — Start a new giveaway via slash command. `title` is the giveaway title, `winners` is the number of winners (1–20), `duration` is how long it runs (`30m`, `2h`, `1d`, max 30 days). Optional `description` (max 1000 chars) and `image` (must be `image/*`).
 - `/giveaway list` — List up to 10 active giveaways in this server with their id, end time, and entry count.
-- `/giveaway cancel <giveaway_id>` — Cancel one of **your** giveaways. You can only cancel giveaways you created.
+- `/giveaway cancel <giveaway_id>` — End one of **your** giveaways immediately and select winners. You can only end giveaways you created. (The same behavior is available as a **Cancel Giveaway** button on the per-giveaway channel — creator-only.)
 - `/giveaway help` — Show the public command reference in an ephemeral embed.
 
 ## Public panel
