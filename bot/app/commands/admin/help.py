@@ -76,7 +76,8 @@ def register_admin_help(admin_group: app_commands.Group) -> None:
             "`{member.mention}` — mentions the new member\n"
             "`{member.name}` — the member's username\n"
             "`{server.name}` — the server name\n"
-            "`{channel.<channel-name>}` — clickable link to a channel (e.g. `{channel.general}`)",
+            "`{channel.<channel-name>}` — clickable link to a text channel (e.g. `{channel.general}`)\n"
+            "`{forum.<forum-name>}` — clickable link to a forum channel (e.g. `{forum.intro}`)",
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)

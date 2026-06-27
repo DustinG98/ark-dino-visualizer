@@ -188,6 +188,14 @@ async def run_bot(config: Config, health: HealthState) -> None:
             else:
                 message = message.replace(match.group(0), f"#{channel_name}")
 
+        for match in re.finditer(r"\{forum\.([^}]+)\}", message_template):
+            forum_name = match.group(1)
+            found_forum = discord.utils.get(member.guild.forums, name=forum_name)
+            if found_forum:
+                message = message.replace(match.group(0), f"<#{found_forum.id}>")
+            else:
+                message = message.replace(match.group(0), f"#{forum_name}")
+
         try:
             await channel.send(message)
         except Exception as exc:
