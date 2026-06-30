@@ -7,6 +7,7 @@ from fastapi.responses import Response, JSONResponse
 from app.api.dinos import (
     get_dino_list,
     apply_region_color,
+    render_advanced,
     load_color_lut,
     load_color_entries,
     load_region_mappings,
@@ -60,6 +61,8 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
 class RenderRequest(BaseModel):
     dinoName: str
     regionColors: dict[int, int]
+    blendModel: str = "advanced"
+    params: dict | None = None
 
 
 @app.get("/")
@@ -99,7 +102,10 @@ def render_dino(request: RenderRequest):
 
     color_lut = load_color_lut()
 
-    result = apply_region_color(image, mask, request.regionColors, color_lut)
+    if request.blendModel == "advanced":
+        result = render_advanced(image, mask, request.regionColors, color_lut, request.params or {})
+    else:
+        result = apply_region_color(image, mask, request.regionColors, color_lut)
 
     import io
     buf = io.BytesIO()
