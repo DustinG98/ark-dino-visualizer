@@ -6,3 +6,4 @@ numpy
 pydantic
 asyncpg
 sqlalchemy[asyncio]
+scipy>=1.10

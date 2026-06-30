@@ -53,12 +53,18 @@ export async function fetchRegions(): Promise<RegionMapping[]> {
 
 export async function fetchColoredDino(
   dinoName: string,
-  regionColors: Record<number, number>
+  regionColors: Record<number, number>,
+  params?: Record<string, number>
 ): Promise<Blob> {
   const response = await fetch(`${API_BASE_URL}/api/dinos/render`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dinoName, regionColors }),
+    body: JSON.stringify({
+      dinoName,
+      regionColors,
+      blendModel: 'advanced',
+      params: params ?? {},
+    }),
   })
 
   if (!response.ok) {

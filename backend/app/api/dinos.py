@@ -10,6 +10,7 @@ DINO_IMAGE_DIR = DATA_DIR / "dino_images" / "images"
 
 REGION_COUNT = 6
 NEUTRAL_COLOR_ID = 18
+OUTPUT_SCALE = 1.0
 
 _REGION_CACHE_PATH = DINO_IMAGE_DIR / "_region_cache.json"
 
@@ -37,6 +38,12 @@ SLOT_REF_RGB = np.array([
 ], dtype=np.float32)
 
 MAX_SLOT_REF_DIST = np.sqrt(255 * 255 * 3)
+
+try:
+    from scipy.ndimage import distance_transform_edt
+    _HAS_SCIPY = True
+except Exception:
+    _HAS_SCIPY = False
 
 
 def _file_hash(path: Path) -> str:
@@ -77,6 +84,20 @@ def _smoothstep(a: float, b: float, x: np.ndarray) -> np.ndarray:
         return np.where(x < a, 0, 1)
     t = np.clip((x - a) / (b - a), 0, 1)
     return t * t * (3 - 2 * t)
+
+
+def _upscale_for_render(
+    image: Image.Image,
+    mask: Image.Image,
+    scale: float,
+) -> tuple[Image.Image, Image.Image]:
+    if scale == 1.0:
+        return image, mask
+    new_w = int(round(image.width * scale))
+    new_h = int(round(image.height * scale))
+    image_up = image.resize((new_w, new_h), Image.BICUBIC)
+    mask_up = mask.resize((new_w, new_h), Image.NEAREST)
+    return image_up, mask_up
 
 
 def _rgb2oklab(r: np.ndarray, g: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -130,100 +151,103 @@ def _lch_to_oklab(L: np.ndarray, C: np.ndarray, h: np.ndarray) -> tuple[np.ndarr
     return L, a, b_val
 
 
+def _chamfer_vectorized(dist: np.ndarray, lab: np.ndarray, W1: float, W2: float) -> tuple[np.ndarray, np.ndarray]:
+    INF = 1e9
+
+    def _pass(d: np.ndarray, l: np.ndarray, fwd: bool) -> tuple[np.ndarray, np.ndarray]:
+        for axis_shift, off in ((0, -1), (0, 1), (1, -1), (1, 1)):
+            if fwd:
+                nd = np.roll(d, off, axis=axis_shift)
+                nl = np.roll(l, off, axis=axis_shift)
+            else:
+                nd = np.roll(d, -off, axis=axis_shift)
+                nl = np.roll(l, -off, axis=axis_shift)
+            w = W2 if off != 0 and axis_shift != 0 else W1
+            if axis_shift == 0:
+                if fwd:
+                    nd[:, -1] = INF
+                    nl[:, -1] = -1
+                else:
+                    nd[:, 0] = INF
+                    nl[:, 0] = -1
+            else:
+                if fwd:
+                    nd[-1, :] = INF
+                    nl[-1, :] = -1
+                else:
+                    nd[0, :] = INF
+                    nl[0, :] = -1
+            nd = nd + w
+            better = (nd < d) & (d < INF)
+            d = np.where(better, nd, d)
+            adopt = better & (l < 0) & (nl >= 0)
+            l = np.where(adopt, nl, l)
+        return d, l
+
+    d, l = _pass(dist, lab, True)
+    d, l = _pass(d, l, False)
+    return d, l
+
+
 def _chamfer_forward(dist: np.ndarray, lab: np.ndarray, W1: float, W2: float) -> None:
-    """Forward chamfer distance pass (in-place)."""
-    h, w = dist.shape
-    for y in range(h):
-        for x in range(w):
-            d = dist[y, x]
-            l = lab[y, x]
-            if d >= 1e9:
-                continue
-            if x > 0:
-                nd = dist[y, x - 1] + W1
-                if nd < d:
-                    d = nd
-                    l = lab[y, x - 1]
-            if y > 0:
-                nd = dist[y - 1, x] + W1
-                if nd < d:
-                    d = nd
-                    l = lab[y - 1, x]
-            if x > 0 and y > 0:
-                nd = dist[y - 1, x - 1] + W2
-                if nd < d:
-                    d = nd
-                    l = lab[y - 1, x - 1]
-            if x < w - 1 and y > 0:
-                nd = dist[y - 1, x + 1] + W2
-                if nd < d:
-                    d = nd
-                    l = lab[y - 1, x + 1]
-            dist[y, x] = d
-            if lab[y, x] < 0 and l >= 0:
-                lab[y, x] = l
+    d, l = _chamfer_vectorized(dist.copy(), lab, W1, W2)
+    dist[...] = d
+    lab[...] = l
 
 
 def _chamfer_backward(dist: np.ndarray, lab: np.ndarray, W1: float, W2: float) -> None:
-    """Backward chamfer distance pass (in-place)."""
-    h, w = dist.shape
-    for y in range(h - 1, -1, -1):
-        for x in range(w - 1, -1, -1):
-            d = dist[y, x]
-            l = lab[y, x]
-            if x < w - 1:
-                nd = dist[y, x + 1] + W1
-                if nd < d:
-                    d = nd
-                    l = lab[y, x + 1]
-            if y < h - 1:
-                nd = dist[y + 1, x] + W1
-                if nd < d:
-                    d = nd
-                    l = lab[y + 1, x]
-            if x < w - 1 and y < h - 1:
-                nd = dist[y + 1, x + 1] + W2
-                if nd < d:
-                    d = nd
-                    l = lab[y + 1, x + 1]
-            if x > 0 and y < h - 1:
-                nd = dist[y + 1, x - 1] + W2
-                if nd < d:
-                    d = nd
-                    l = lab[y + 1, x - 1]
-            dist[y, x] = d
-            if lab[y, x] < 0 and l >= 0:
-                lab[y, x] = l
+    d, l = _chamfer_vectorized(dist.copy(), lab, W1, W2)
+    dist[...] = d
+    lab[...] = l
+
+
+def _chamfer_with_labels(dist_seed: np.ndarray, lab_seed: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    INF = 1e9
+    if _HAS_SCIPY:
+        seed_mask = (dist_seed == 0)
+        if not seed_mask.any():
+            return (np.full(dist_seed.shape, INF, dtype=np.float32),
+                    np.full(dist_seed.shape, -1, dtype=np.int16))
+        not_seed = np.where(seed_mask, 0, 1).astype(np.uint8)
+        dist, idx = distance_transform_edt(not_seed, return_indices=True)
+        nearest = lab_seed[idx[0], idx[1]].astype(np.int16)
+        nearest = np.where(seed_mask, lab_seed, nearest)
+        dist = np.where(seed_mask | (dist > 0), dist, INF).astype(np.float32)
+        return dist, nearest
+
+    W1 = 1.0
+    W2 = np.sqrt(2.0)
+    d = dist_seed.copy()
+    l = lab_seed.copy()
+    d, l = _chamfer_vectorized(d, l, W1, W2)
+    d, l = _chamfer_vectorized(d, l, W1, W2)
+    return d, l
 
 
 def _get_mask_exactness_2d(
     slot: np.ndarray, mr: np.ndarray, mg: np.ndarray, mb: np.ndarray,
     threshold: float = 80, feather: float = 0,
 ) -> np.ndarray:
-    """Vectorized mask exactness computation across all pixels."""
     t = np.clip(threshold / 150.0, 0, 1)
     fw = 0.02 + np.clip(feather, 0, 4) * 0.06
     t0 = np.maximum(0, t - fw * 0.5)
     t1 = np.minimum(1, t + fw * 0.5)
 
     exactness = np.zeros_like(mr, dtype=np.float32)
-    valid_slot = (slot >= 0) & (slot <= 5)
-    if not np.any(valid_slot):
+    valid = (slot >= 0) & (slot <= 5)
+    if not np.any(valid):
         return exactness
 
-    slots = np.unique(slot[valid_slot]).astype(int)
-    for s in slots:
-        mask = slot == s
-        ref = SLOT_REF_RGB[s]
-        dr = mr[mask] - ref[0]
-        dg = mg[mask] - ref[1]
-        db = mb[mask] - ref[2]
-        dist_n = np.sqrt(dr * dr + dg * dg + db * db) / MAX_SLOT_REF_DIST
+    slot_clipped = np.clip(slot, 0, 5).astype(np.int32)
+    refs = SLOT_REF_RGB[slot_clipped]
+    dr = mr - refs[..., 0]
+    dg = mg - refs[..., 1]
+    db = mb - refs[..., 2]
+    dist_n = np.sqrt(dr * dr + dg * dg + db * db) / MAX_SLOT_REF_DIST
 
-        ts = np.clip((dist_n - t0) / (t1 - t0 + 1e-10), 0, 1)
-        smooth = ts * ts * (3 - 2 * ts)
-        exactness[mask] = 1 - smooth
-
+    ts = np.clip((dist_n - t0) / (t1 - t0 + 1e-10), 0, 1)
+    smooth = ts * ts * (3 - 2 * ts)
+    exactness = np.where(valid, 1 - smooth, 0.0).astype(np.float32)
     return exactness
 
 
@@ -254,12 +278,8 @@ def _get_advanced_mask_analysis(
     bxd = np.where(valid_mask, bxd / safe_ln, 0.0)
 
     INF = 1e9
-    dist = np.full((h, w), INF, dtype=np.float32)
     lab = np.full((h, w), -1, dtype=np.int16)
     conf = np.zeros((h, w), dtype=np.float32)
-
-    import logging
-    _logger2 = logging.getLogger("app")
 
     best_cs = np.full((h, w), -2.0, dtype=np.float32)
     for s in range(6):
@@ -269,38 +289,6 @@ def _get_advanced_mask_analysis(
         best_cs = np.where(update, cs, best_cs)
         lab = np.where(update, s, lab)
 
-    test_y, test_x = 100, 100
-    if h > test_y and w > test_x:
-        _rxd_v = float(rxd[test_y, test_x])
-        _gxd_v = float(gxd[test_y, test_x])
-        _bxd_v = float(bxd[test_y, test_x])
-        _valid_v = bool(valid_mask[test_y, test_x])
-        _cs_vals = []
-        for s in range(6):
-            _ref = REF[s]
-            _cs = _rxd_v * float(_ref[0]) + _gxd_v * float(_ref[1]) + _bxd_v * float(_ref[2])
-            _cs_vals.append(round(_cs, 4))
-        _logger2.info("DEBUG slot test [%d,%d]: rxd=%.4f gxd=%.4f bxd=%.4f valid=%s cs_per_slot=%s best_cs=%.4f lab=%d",
-                      test_y, test_x, _rxd_v, _gxd_v, _bxd_v, _valid_v, _cs_vals, float(best_cs[test_y, test_x]), int(lab[test_y, test_x]))
-
-    _logger2.info("DEBUG AFTER slot finding: %s", {int(v): int((lab == v).sum()) for v in np.unique(lab)})
-
-    test_y, test_x = 100, 100
-    if h > test_y and w > test_x:
-        _mr = float(mr[test_y, test_x])
-        _mg = float(mg[test_y, test_x])
-        _mb = float(mb[test_y, test_x])
-        _minc = float(min_c[test_y, test_x])
-        _rxd_raw = _mr - _minc
-        _gxd_raw = _mg - _minc
-        _bxd_raw = _mb - _minc
-        _ln_calc = (_rxd_raw**2 + _gxd_raw**2 + _bxd_raw**2) ** 0.5
-        _rxd_norm = _rxd_raw / _ln_calc if _ln_calc > 1e-6 else 0.0
-        _gxd_norm = _gxd_raw / _ln_calc if _ln_calc > 1e-6 else 0.0
-        _bxd_norm = _bxd_raw / _ln_calc if _ln_calc > 1e-6 else 0.0
-        _logger2.info("DEBUG pixel [%d,%d] mask=(%.1f,%.1f,%.1f) min_c=%.1f raw=(%.1f,%.1f,%.1f) ln=%.3f norm=(%.3f,%.3f,%.3f) lab=%d",
-                      test_y, test_x, _mr, _mg, _mb, _minc, _rxd_raw, _gxd_raw, _bxd_raw, _ln_calc, _rxd_norm, _gxd_norm, _bxd_norm, int(lab[test_y, test_x]))
-
     valid_pixels = lab >= 0
     exactness = np.zeros((h, w), dtype=np.float32)
     if np.any(valid_pixels):
@@ -309,15 +297,10 @@ def _get_advanced_mask_analysis(
     conf = np.where(valid_pixels, (chr_arr / 255) * exactness, 0.0)
     seed_chr = max(8, int(8 + (threshold / 150) * 30))
     seed_mask = valid_pixels & (chr_arr >= seed_chr)
-    dist = np.where(seed_mask, 0.0, dist)
-    _logger2.info("DEBUG AFTER seed: %s", {int(v): int((lab == v).sum()) for v in np.unique(lab)})
 
-    W1 = 1.0
-    W2 = np.sqrt(2.0)
-
-    _chamfer_forward(dist, lab, W1, W2)
-    _chamfer_backward(dist, lab, W1, W2)
-    _logger2.info("DEBUG AFTER chamfer: %s", {int(v): int((lab == v).sum()) for v in np.unique(lab)})
+    dist_seed = np.where(seed_mask, 0.0, INF).astype(np.float32)
+    lab_seed = np.where(seed_mask, lab, -1).astype(np.int16)
+    dist, lab = _chamfer_with_labels(dist_seed, lab_seed)
 
     sc_raw = float(np.clip(speckle_clean, 0, 2))
     if sc_raw > 0:
@@ -328,28 +311,29 @@ def _get_advanced_mask_analysis(
         passes = 3 if sc_raw >= 1.6 else (2 if sc_raw >= 0.6 else 1)
 
         for _pass in range(passes):
-            votes = np.zeros((h, w, 6), dtype=np.int32)
+            one_hot = np.zeros((h, w, 6), dtype=np.int8)
+            valid_lab = lab >= 0
             for s in range(6):
-                mask_s = (lab == s)
-                count = np.zeros((h, w), dtype=np.int32)
-                for dy in range(-1, 2):
-                    for dx in range(-1, 2):
-                        if dx == 0 and dy == 0:
-                            continue
-                        src = mask_s[
-                            max(0, -dy):h - max(0, dy),
-                            max(0, -dx):w - max(0, dx),
-                        ]
-                        dst_slice = (
-                            slice(max(0, dy), h + min(0, dy)),
-                            slice(max(0, dx), w + min(0, dx)),
-                        )
-                        count[dst_slice] += src.astype(np.int32)
-                votes[..., s] = count
+                one_hot[..., s] = (lab == s) & valid_lab
 
-            best_idx = votes.argmax(axis=-1)
-            best_count = votes.max(axis=-1)
-            update = (best_count >= min_major) & (conf <= conf_thr) & (best_idx < 6) & (lab != best_idx)
+            shifts = [(-1, -1), (-1, 0), (-1, 1),
+                      (0, -1),           (0, 1),
+                      (1, -1),  (1, 0),  (1, 1)]
+            counts = np.zeros((h, w, 6), dtype=np.int32)
+            for dy, dx in shifts:
+                src_y0 = max(0, -dy)
+                src_y1 = h - max(0, dy)
+                src_x0 = max(0, -dx)
+                src_x1 = w - max(0, dx)
+                dst_y0 = max(0, dy)
+                dst_y1 = h + min(0, dy)
+                dst_x0 = max(0, dx)
+                dst_x1 = w + min(0, dx)
+                counts[dst_y0:dst_y1, dst_x0:dst_x1] += one_hot[src_y0:src_y1, src_x0:src_x1].astype(np.int32)
+
+            best_idx = counts.argmax(axis=-1)
+            best_count = counts.max(axis=-1)
+            update = (best_count >= min_major) & (conf <= conf_thr) & (lab != best_idx)
             lab = np.where(update, best_idx.astype(np.int16), lab)
 
     return dist, lab, conf
@@ -376,11 +360,15 @@ def detect_used_regions(mask_path: Path) -> set[int]:
     mr = mask_arr[..., 0]
     mg = mask_arr[..., 1]
     mb = mask_arr[..., 2]
-    used = set()
-    for region in range(REGION_COUNT):
-        opacity = _opacity_from_mask(region, mr, mg, mb)
-        if opacity.max() > 0.01:
-            used.add(region)
+    opacities = np.stack([
+        np.maximum(0, mr - mg - mb),
+        np.maximum(0, mg - mr - mb),
+        np.maximum(0, mb - mr - mg),
+        np.minimum(mg, mb),
+        np.minimum(mr, mg),
+        np.minimum(mr, mb),
+    ], axis=-1)
+    used = set(np.where(opacities.max(axis=(0, 1)) > 2.55)[0].tolist())
     return used
 
 
@@ -391,10 +379,11 @@ def apply_region_color(
     color_lut: dict[int, tuple[int, int, int]],
     **kwargs,
 ) -> Image.Image:
+    image, mask = _upscale_for_render(image, mask, OUTPUT_SCALE)
+
     has_alpha = image.mode == "RGBA"
-    image_arr = np.array(image)
     if has_alpha:
-        alpha = image_arr[:, :, 3]
+        alpha = np.array(image)[:, :, 3]
 
     base = np.array(image.convert("RGB"), dtype=np.float32)
     mask_arr = np.array(mask.convert("RGB"), dtype=np.float32)
@@ -450,60 +439,12 @@ def render_advanced(
     shade_base = float(params.get("shadeBase", 0.14))
     shade_scale = float(params.get("shadeScale", 0.12))
 
+    image, mask = _upscale_for_render(image, mask, OUTPUT_SCALE)
+
     has_alpha = image.mode == "RGBA"
     base = np.array(image.convert("RGB"), dtype=np.float32)
     mask_arr = np.array(mask.convert("RGB"), dtype=np.float32)
     alpha = np.array(image)[:, :, 3] if has_alpha else None
-
-    import logging
-    _logger = logging.getLogger("app")
-    _logger.info("DEBUG mask mode: %s shape: %s", mask.mode, mask_arr.shape)
-    _logger.info("DEBUG mask file: %s", mask.filename if hasattr(mask, 'filename') else 'unknown')
-    _logger.info("DEBUG mask full value range: min=%s max=%s mean=%s", mask_arr.min(), mask_arr.max(), mask_arr.mean())
-    _logger.info("DEBUG mask unique R values: %s", np.unique(mask_arr[..., 0])[:20])
-    _logger.info("DEBUG mask unique G values: %s", np.unique(mask_arr[..., 1])[:20])
-    _logger.info("DEBUG mask unique B values: %s", np.unique(mask_arr[..., 2])[:20])
-    if mask.mode == "RGBA":
-        mask_rgba = np.array(mask)
-        _logger.info("DEBUG mask alpha unique: %s", np.unique(mask_rgba[..., 3])[:10])
-        _logger.info("DEBUG mask RGB unique (first 10): %s", [list(c) for c in np.unique(mask_rgba[..., :3].reshape(-1, 3), axis=0)[:10]])
-
-    high_pixels = (mask_arr.max(axis=-1) > 100)
-    total_pixels = mask_arr.shape[0] * mask_arr.shape[1]
-    _logger.info("DEBUG high-value pixels (>100): %d out of %d", int(high_pixels.sum()), total_pixels)
-    if high_pixels.sum() > 0:
-        high_colors = mask_arr[high_pixels]
-        unique_high = np.unique(high_colors.reshape(-1, 3), axis=0)
-        _logger.info("DEBUG high-value unique colors (first 20): %s", [list(c) for c in unique_high[:20]])
-
-    mask_flat = mask_arr.reshape(-1, 3)
-    bright_pixels = mask_flat[(mask_flat.max(axis=-1) > 30) & (mask_flat.max(axis=-1) - mask_flat.min(axis=-1) > 15)]
-    if len(bright_pixels) > 0:
-        unique_bright = np.unique(bright_pixels, axis=0)
-        _logger.info("DEBUG bright mask pixels count: %d", len(unique_bright))
-        _logger.info("DEBUG bright mask pixels (first 40): %s", [list(c) for c in unique_bright[:40]])
-
-        for pixel in unique_bright[:30]:
-            r, g, b = float(pixel[0]), float(pixel[1]), float(pixel[2])
-            min_c = min(r, g, b)
-            max_c = max(r, g, b)
-            chr_val = max_c - min_c
-            if chr_val < 1:
-                continue
-            ln = (r*r + g*g + b*b - 2*min_c*(r+g+b) + 3*min_c*min_c) ** 0.5
-            if ln < 1e-6:
-                continue
-            rxd = (r - min_c) / ln
-            gxd = (g - min_c) / ln
-            bxd = (b - min_c) / ln
-            dots = []
-            for s in range(6):
-                ref = REF[s]
-                dot = max(0, rxd*ref[0] + gxd*ref[1] + bxd*ref[2])
-                dots.append(round(dot, 3))
-            _logger.info("DEBUG pixel (%s) dir=(%.3f,%.3f,%.3f) dots=%s best_slot=%d", [r,g,b], rxd, gxd, bxd, dots, dots.index(max(dots)))
-    else:
-        _logger.info("DEBUG no bright colored pixels found in mask")
 
     h, w = base.shape[:2]
 
@@ -530,12 +471,6 @@ def render_advanced(
         "feather": feather,
         "speckleClean": speckle_clean,
     })
-
-    import logging
-    _logger = logging.getLogger("app")
-    _logger.info("DEBUG lab counts: %s", {int(v): int((lab == v).sum()) for v in np.unique(lab)})
-    _logger.info("DEBUG pal_valid: %s", pal_valid.tolist())
-    _logger.info("DEBUG region_colors: %s", region_colors)
 
     mr = mask_arr[..., 0]
     mg = mask_arr[..., 1]
@@ -598,7 +533,7 @@ def render_advanced(
     sum_w = wv_all.sum(axis=-1)
     wmax = wv_all.max(axis=-1)
     wmax_idx = wv_all.argmax(axis=-1)
-    sorted_wv = np.sort(wv_all, axis=-1)[:, :, ::-1] if False else -np.sort(-wv_all, axis=-1)
+    sorted_wv = -np.sort(-wv_all, axis=-1)
     w2 = sorted_wv[:, :, 1] if wv_all.shape[-1] > 1 else np.zeros_like(wmax)
 
     ratio = np.where(w2 > 0, wmax / np.maximum(w2, 1e-10), np.inf)
@@ -640,30 +575,39 @@ def render_advanced(
     t_b = np.where(new_process, t_b, 0.0)
 
     if bstr > 0.0001:
-        lab_padded = np.pad(lab, 1, mode="constant", constant_values=-1)
-        pal_valid_neighbors = np.zeros((h, w), dtype=bool)
-        cnt_other = np.zeros((h, w), dtype=np.float32)
+        one_hot = np.zeros((h, w, 6), dtype=np.int8)
+        valid_lab = (lab >= 0)
+        for s in range(6):
+            one_hot[..., s] = (lab == s) & valid_lab
+
         cnt = np.zeros((h, w), dtype=np.float32)
+        cnt_other = np.zeros((h, w), dtype=np.float32)
         nb = np.full((h, w), -1, dtype=np.int16)
         nb_valid = np.zeros((h, w), dtype=bool)
 
-        for dy in range(-1, 2):
-            for dx in range(-1, 2):
-                if dx == 0 and dy == 0:
-                    continue
-                nlab = lab_padded[1 + dy:h + 1 + dy, 1 + dx:w + 1 + dx]
-                valid_neighbor = nlab >= 0
-                cnt += valid_neighbor
-                diff = (nlab != new_lab) & valid_neighbor & (new_lab >= 0)
-                cnt_other += diff.astype(np.float32)
+        shifts = [(-1, -1), (-1, 0), (-1, 1),
+                  (0, -1),           (0, 1),
+                  (1, -1),  (1, 0),  (1, 1)]
+        for dy, dx in shifts:
+            src_y0 = max(0, -dy); src_y1 = h - max(0, dy)
+            src_x0 = max(0, -dx); src_x1 = w - max(0, dx)
+            dst_y0 = max(0, dy);  dst_y1 = h + min(0, dy)
+            dst_x0 = max(0, dx);  dst_x1 = w + min(0, dx)
 
-                for s in range(6):
-                    if not pal_valid[s]:
-                        continue
-                    is_s = (nlab == s) & diff
-                    take = is_s & (~nb_valid | ((nlab == s) & (cnt_other > 0)))
-                    nb = np.where(take, s, nb)
-                    nb_valid = nb_valid | is_s
+            nlab = lab[src_y0:src_y1, src_x0:src_x1]
+            valid_neighbor = nlab >= 0
+            cnt[dst_y0:dst_y1, dst_x0:dst_x1] += valid_neighbor.astype(np.float32)
+
+            diff = (nlab != new_lab[dst_y0:dst_y1, dst_x0:dst_x1]) & valid_neighbor & (new_lab[dst_y0:dst_y1, dst_x0:dst_x1] >= 0)
+            cnt_other[dst_y0:dst_y1, dst_x0:dst_x1] += diff.astype(np.float32)
+
+            for s in range(6):
+                if not pal_valid[s]:
+                    continue
+                is_s = (nlab == s) & diff
+                take = is_s & (~nb_valid[dst_y0:dst_y1, dst_x0:dst_x1])
+                nb[dst_y0:dst_y1, dst_x0:dst_x1] = np.where(take, s, nb[dst_y0:dst_y1, dst_x0:dst_x1])
+                nb_valid[dst_y0:dst_y1, dst_x0:dst_x1] |= is_s
 
         ratio_nb = np.where(cnt > 0, cnt_other / np.maximum(cnt, 1e-10), 0.0)
         a = np.clip(bstr * ratio_nb, 0, 1)
@@ -687,8 +631,11 @@ def render_advanced(
     target_ok_l, target_ok_a, target_ok_b = _rgb2oklab(t_r, t_g, t_b)
     target_l, target_c, target_h = _oklab_to_lch(target_ok_l, target_ok_a, target_ok_b)
 
+    is_white_target = (target_c <= 0.03) & (target_l >= 0.92)
+
     low_chroma = (target_c <= 0.03) & (w_mask < 0.999)
     cap = 0.65 + 0.3 * np.where(conf > 0, conf, 0.0)
+    cap = np.where(is_white_target, 0.97, cap)
     w_mask = np.where(low_chroma & (w_mask > cap), cap, w_mask)
     w_mask = np.where(new_process, w_mask, 0.0)
 
@@ -742,6 +689,7 @@ def render_advanced(
     keep_l = np.clip(keep_light - (1 - cn) * keep_light_drop, 0, 1)
     keep_l = np.minimum(1, keep_l + 0.2 * neutral_weight * highlight)
     keep_l = np.where(vivid_lift > 0, np.clip(keep_l - 0.25 * vivid_lift, 0, 1), keep_l)
+    keep_l = np.where(is_white_target, np.minimum(keep_l, 0.12), keep_l)
 
     l_mix = base_ok_l * keep_l + target_l * (1 - keep_l)
     tint_l, tint_a, tint_b = _lch_to_oklab(l_mix, cx, target_h)
@@ -768,6 +716,7 @@ def render_advanced(
     mul_b = bl * (0.5 + 0.5 * target_bl)
 
     shade_preserve = np.clip(shade_base + shade_scale * w_mask + 0.05 * vivid_weight, 0, 0.3)
+    shade_preserve = np.where(is_white_target, np.minimum(shade_preserve, 0.06), shade_preserve)
     o0 = o0 * (1 - shade_preserve) + mul_r * shade_preserve
     o1 = o1 * (1 - shade_preserve) + mul_g * shade_preserve
     o2 = o2 * (1 - shade_preserve) + mul_b * shade_preserve
